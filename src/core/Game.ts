@@ -198,17 +198,23 @@ export class Game {
 
   private wireEvents() {
     this.bus.on('crime', ({ type, witnessed, heat }) => {
+      if (witnessed && heat > 0) {
+        const pv = this.player.body.linvel();
+        this.police.reportSighting(this.player.x, this.player.z, pv.x, pv.z, this.time);
+      }
       if (heat > 0) this.hud.toast(`+HEAT · ${CRIME_LABELS[type]}`, '#ff5566');
       else if (!witnessed && type !== 'propertyDamage') this.hud.toast(`${CRIME_LABELS[type]} (UNSEEN)`, '#7a8ea8');
     });
     this.bus.on('pursuitStarted', ({ stars }) => {
+      const pv = this.player.body.linvel();
+      this.police.reportSighting(this.player.x, this.player.z, pv.x, pv.z, this.time);
       this.hud.banner(`PURSUIT ★${stars}`, 'LOSE LINE OF SIGHT TO ESCAPE', '#ff2035', 2.4);
       this.audio.stinger(true);
     });
     this.bus.on('heatChanged', ({ stars }) => {
       if (stars >= 3) this.hud.toast(`WANTED LEVEL ★${stars} — ROADBLOCKS DEPLOYED`, '#ffae00');
     });
-    this.bus.on('cooldownStarted', () => this.hud.toast('OUT OF SIGHT — COOLDOWN STARTED', '#20b8ff'));
+    this.bus.on('cooldownStarted', () => this.hud.toast('OUT OF SIGHT — COPS SEARCHING LAST KNOWN POS', '#20b8ff'));
     this.bus.on('spotted', () => this.hud.toast('SPOTTED BY POLICE!', '#ff2035'));
     this.bus.on('ticket', ({ fine }) => {
       const paid = Math.min(this.save.cash, fine);
@@ -353,7 +359,8 @@ export class Game {
     const lookBack = this.input.isDown('KeyB') || this.input.isDown('KeyV');
     this.chaseCam.update(dt, this.player, lookBack);
     this.sky.position.set(this.player.x, 0, this.player.z);
-    this.pipeline.speedBlur = this.player.nitroActive ? 1 : Math.max(0, (Math.abs(this.player.speed) - 48) / 30);
+    const spFactor = Math.max(0, (Math.abs(this.player.speed) - 20) / 42);
+    this.pipeline.speedBlur = Math.min(1.4, spFactor * 0.75 + (this.player.nitroActive ? 0.85 : 0));
 
     const pv = this.player.body.linvel();
     const rightX = Math.cos(this.chaseCam.cam.rotation.y);

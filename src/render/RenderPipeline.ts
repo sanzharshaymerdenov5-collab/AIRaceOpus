@@ -8,6 +8,7 @@ export interface RetroSettings {
   bloom: boolean;
   ps1: boolean;
   fogDensity: number;
+  motionBlur: number; // 0 (off) .. 2 (200% intense)
 }
 
 export const defaultRetro = (): RetroSettings => ({
@@ -17,6 +18,7 @@ export const defaultRetro = (): RetroSettings => ({
   bloom: true,
   ps1: false,
   fogDensity: 0.0042,
+  motionBlur: 1,
 });
 
 const fsQuadVert = /* glsl */ `
@@ -62,11 +64,13 @@ vec3 toSRGB(vec3 c) { return pow(max(c, 0.0), vec3(1.0 / 2.2)); }
 void main() {
   vec2 uv = vUv;
   vec3 c = texture2D(tScene, uv).rgb;
-  // radial speed blur (nitro)
+  // PS2-style edge-weighted radial motion blur (keeps car centre sharp)
   if (uBlur > 0.001) {
-    vec2 d = (uv - 0.5) * uBlur * 0.04;
-    for (int k = 1; k < 6; k++) c += texture2D(tScene, uv - d * float(k)).rgb;
-    c /= 6.0;
+    vec2 rel = uv - 0.5;
+    float edge = smoothstep(0.08, 0.62, length(rel));
+    vec2 d = rel * edge * uBlur * 0.032;
+    for (int k = 1; k < 8; k++) c += texture2D(tScene, clamp(uv - d * float(k), 0.002, 0.998)).rgb;
+    c /= 8.0;
   }
   if (uBloom > 0.5) c += texture2D(tBloom, uv).rgb * 0.9;
   c = toSRGB(c);
@@ -211,7 +215,7 @@ export class RenderPipeline {
     u.uBloom.value = s.bloom ? 1 : 0;
     u.uFlash.value = this.flash;
     u.uFlashColor.value.copy(this.flashColor);
-    u.uBlur.value = this.speedBlur;
+    u.uBlur.value = this.speedBlur * (s.motionBlur ?? 1);
     this.pass(this.composite, null);
   }
 }

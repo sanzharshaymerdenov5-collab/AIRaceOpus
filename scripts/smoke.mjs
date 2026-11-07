@@ -22,6 +22,13 @@ await page.waitForFunction(() => Boolean(window.game && window.game.player));
 await page.waitForTimeout(600);
 await page.screenshot({ path: `${OUT}/01-title.png` });
 
+// Retro / Audio Options screen (verify Motion Blur slider)
+await page.click('#btn-settings');
+await page.waitForTimeout(300);
+await page.screenshot({ path: `${OUT}/05-settings.png` });
+await page.click('#o-back');
+await page.waitForTimeout(200);
+
 // Garage screen
 await page.click('#btn-garage');
 await page.waitForTimeout(400);

@@ -157,6 +157,7 @@ export class Menus {
   showSettings(onBack: () => void) {
     this.root.style.pointerEvents = 'auto';
     const r = this.save.retro;
+    const blurPct = Math.round((r.motionBlur ?? 1) * 100);
     this.root.innerHTML = `
       <div class="menu-screen pause-screen">
         <h2>RETRO &amp; AUDIO OPTIONS</h2>
@@ -167,6 +168,9 @@ export class Menus {
               <option value="448" ${r.resHeight === 448 ? 'selected' : ''}>640×448 (PS2 NTSC Default)</option>
               <option value="720" ${r.resHeight === 720 ? 'selected' : ''}>1280×720 (HD Remaster)</option>
             </select>
+          </label>
+          <label><span>MOTION BLUR (<span id="o-blur-val">${blurPct}%</span>)</span>
+            <input type="range" id="o-blur" min="0" max="200" step="10" value="${blurPct}"/>
           </label>
           <label><input type="checkbox" id="o-dither" ${r.dither ? 'checked' : ''}/> ORDERED BAYER DITHER + 15-BIT COLOUR</label>
           <label><input type="checkbox" id="o-bloom" ${r.bloom ? 'checked' : ''}/> NEON BLOOM GLOW</label>
@@ -179,8 +183,12 @@ export class Menus {
         <div class="menu-buttons"><button id="o-back" class="btn primary">APPLY &amp; BACK</button></div>
       </div>
     `;
+    const blurValEl = this.root.querySelector('#o-blur-val') as HTMLElement;
     const apply = () => {
       r.resHeight = Number((this.root.querySelector('#o-res') as HTMLSelectElement).value);
+      const bp = Number((this.root.querySelector('#o-blur') as HTMLInputElement).value);
+      r.motionBlur = bp / 100;
+      if (blurValEl) blurValEl.textContent = `${bp}%`;
       r.dither = (this.root.querySelector('#o-dither') as HTMLInputElement).checked;
       r.bloom = (this.root.querySelector('#o-bloom') as HTMLInputElement).checked;
       r.scanlines = (this.root.querySelector('#o-scan') as HTMLInputElement).checked;
@@ -190,7 +198,10 @@ export class Menus {
       this.save.music = (this.root.querySelector('#o-mus') as HTMLInputElement).checked;
       this.cb.onSettingsChanged();
     };
-    this.root.querySelectorAll('input,select').forEach((el) => el.addEventListener('change', apply));
+    this.root.querySelectorAll('input,select').forEach((el) => {
+      el.addEventListener('change', apply);
+      el.addEventListener('input', apply);
+    });
     this.root.querySelector('#o-back')!.addEventListener('click', () => {
       apply();
       onBack();

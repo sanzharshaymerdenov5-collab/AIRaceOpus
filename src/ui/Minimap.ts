@@ -107,19 +107,50 @@ export class Minimap {
     // Traffic
     for (const t of traffic) dot(t.car.x, t.car.z, 1.8, '#8a99ad');
 
+    // Last Known Position (LKP) marker when police have lost sight and are searching
+    const lk = cops.lastKnown;
+    if (lk.active && !cops.anySees) {
+      const lx = (lk.x - px) * scale;
+      const lz = (lk.z - pz) * scale;
+      const pulse = 6 + (Math.sin(time * 7) * 0.5 + 0.5) * 5;
+      ctx.strokeStyle = 'rgba(255, 200, 0, 0.85)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(lx, lz, pulse, 0, Math.PI * 2);
+      ctx.stroke();
+      // crosshair + projected escape vector
+      ctx.beginPath();
+      ctx.moveTo(lx - 5, lz);
+      ctx.lineTo(lx + 5, lz);
+      ctx.moveTo(lx, lz - 5);
+      ctx.lineTo(lx, lz + 5);
+      ctx.moveTo(lx, lz);
+      ctx.lineTo(lx + lk.dirX * 18, lz + lk.dirZ * 18);
+      ctx.stroke();
+    }
+
     // Cops + search cones
     const flash = Math.floor(time * 8) % 2 === 0;
     const drawCop = (u: CopUnit) => {
       const cx = (u.car.x - px) * scale;
       const cz = (u.car.z - pz) * scale;
       if (u.state !== 'patrol') {
+        if (u.state === 'search') {
+          // faint line showing the sector intersection the AI Director assigned this unit
+          ctx.strokeStyle = 'rgba(80, 180, 255, 0.25)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(cx, cz);
+          ctx.lineTo((u.targetX - px) * scale, (u.targetZ - pz) * scale);
+          ctx.stroke();
+        }
         ctx.save();
         ctx.translate(cx, cz);
         ctx.rotate(-u.car.yaw);
-        ctx.fillStyle = u.seesPlayer ? 'rgba(255,40,60,0.26)' : 'rgba(60,140,255,0.20)';
+        ctx.fillStyle = u.seesPlayer ? 'rgba(255,40,60,0.28)' : 'rgba(60,150,255,0.22)';
         ctx.beginPath();
         ctx.moveTo(0, 0);
-        ctx.arc(0, 0, 32, Math.PI * 0.3, Math.PI * 0.7);
+        ctx.arc(0, 0, 38, Math.PI * 0.26, Math.PI * 0.74);
         ctx.closePath();
         ctx.fill();
         ctx.restore();
