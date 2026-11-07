@@ -22,6 +22,17 @@ html, body {
   margin-top: 6px; text-align: center; font-size: 11px; font-weight: 900;
   letter-spacing: 0.14em; color: #ffae00; text-shadow: 0 2px 4px #000;
 }
+.mode-tag {
+  margin-top: 4px; text-align: center; font-size: 10px; font-weight: 900;
+  letter-spacing: 0.12em; padding: 3px 8px; border-radius: 2px;
+  text-shadow: 0 1px 3px #000;
+}
+.mode-tag.day {
+  background: rgba(255, 42, 109, 0.85); color: #fff; border: 1px solid #ffc800;
+}
+.mode-tag.night {
+  background: rgba(8, 16, 38, 0.88); color: #05d9e8; border: 1px solid #05d9e8;
+}
 
 .hud-top-right {
   position: absolute; top: 16px; right: 20px; text-align: right;

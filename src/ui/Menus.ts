@@ -9,6 +9,7 @@ export interface MenuCallbacks {
   onResume: () => void;
   onSettingsChanged: () => void;
   onSplashContinue: () => void;
+  onToggleTimeOfDay?: () => void;
   onPreviewSound?: (kind: 'master' | 'soundtrack' | 'vehicle' | 'sfx') => void;
 }
 
@@ -17,7 +18,7 @@ const hexCss = (n: number) => '#' + n.toString(16).padStart(6, '0');
 
 /**
  * Full-screen PS2-style menu overlays:
- * Title screen, Garage (car/paint picker + buy), Pause + Retro/Audio settings, and Busted/Escaped/Wrecked splash.
+ * Title screen, Garage (car/paint picker + buy + Day/Night switch), Pause + Retro/Audio settings, and Busted/Escaped/Wrecked splash.
  */
 export class Menus {
   readonly root: HTMLElement;
@@ -41,13 +42,16 @@ export class Menus {
 
   showTitle() {
     this.root.style.pointerEvents = 'auto';
+    const isDay = this.save.timeOfDay === 'day';
+    const modeLabel = isDay ? '☀ MODE: DAY (OFFICIAL RACES)' : '☾ MODE: NIGHT (OUTLAW HEAT)';
     this.root.innerHTML = `
       <div class="menu-screen title-screen">
-        <div class="ps2-badge">PLAYSTATION 2 ARCADE EDITION · 640×448 NTSC</div>
+        <div class="ps2-badge">PLAYSTATION 2 ARCADE EDITION · 1.5×1.5 KM PALM DISTRICT</div>
         <h1 class="game-logo">NEON<span>DISTRICT</span></h1>
-        <div class="subtitle">MOST WANTED · STREET PURSUIT</div>
+        <div class="subtitle">${isDay ? 'SPEEDHUNTER SHOWDOWN · OFFICIAL RACES' : 'MOST WANTED · STREET PURSUIT'}</div>
         <div class="menu-buttons">
-          <button id="btn-drive" class="btn primary">HIT THE STREETS</button>
+          <button id="btn-drive" class="btn primary">${isDay ? 'ENTER DAY SHOWDOWN' : 'HIT THE NIGHT STREETS'}</button>
+          <button id="btn-mode" class="btn">${modeLabel}</button>
           <button id="btn-garage" class="btn">GARAGE &amp; CARS</button>
           <button id="btn-settings" class="btn">RETRO / AUDIO OPTIONS</button>
         </div>
@@ -56,6 +60,10 @@ export class Menus {
       </div>
     `;
     this.root.querySelector('#btn-drive')!.addEventListener('click', () => this.cb.onStartDrive());
+    this.root.querySelector('#btn-mode')!.addEventListener('click', () => {
+      this.cb.onToggleTimeOfDay?.();
+      this.showTitle();
+    });
     this.root.querySelector('#btn-garage')!.addEventListener('click', () => this.cb.onOpenGarage());
     this.root.querySelector('#btn-settings')!.addEventListener('click', () => this.showSettings(() => this.showTitle()));
   }
@@ -65,6 +73,7 @@ export class Menus {
     const def = PLAYER_CARS[this.garageIdx];
     const owned = this.save.unlocked.includes(def.spec.id);
     const selected = this.save.carId === def.spec.id;
+    const isDay = this.save.timeOfDay === 'day';
     const swatches = def.colors
       .map(
         (c, i) =>
@@ -75,7 +84,7 @@ export class Menus {
     this.root.innerHTML = `
       <div class="menu-screen garage-screen">
         <div class="garage-header">
-          <h2>UNDERGROUND GARAGE</h2>
+          <h2>SPEEDHUNTER GARAGE</h2>
           <div class="bank">BANK: $${this.save.cash.toLocaleString()}</div>
         </div>
         <div class="garage-card">
@@ -95,9 +104,10 @@ export class Menus {
           <div class="menu-buttons horiz">
             ${
               owned
-                ? `<button id="g-drive" class="btn primary">DRIVE THIS CAR</button>`
+                ? `<button id="g-drive" class="btn primary">DRIVE (${isDay ? 'DAY' : 'NIGHT'})</button>`
                 : `<button id="g-buy" class="btn primary" ${this.save.cash < def.price ? 'disabled' : ''}>BUY FOR $${def.price.toLocaleString()}</button>`
             }
+            <button id="g-mode" class="btn small">${isDay ? '☀ DAY' : '☾ NIGHT'}</button>
             <button id="g-back" class="btn">BACK</button>
           </div>
         </div>
@@ -129,8 +139,11 @@ export class Menus {
     this.root.querySelector('#g-buy')?.addEventListener('click', () => {
       if (this.cb.onBuyCar(def)) this.showGarage();
     });
+    this.root.querySelector('#g-mode')!.addEventListener('click', () => {
+      this.cb.onToggleTimeOfDay?.();
+      this.showGarage();
+    });
     this.root.querySelector('#g-back')!.addEventListener('click', () => {
-      // revert preview to owned selection if player didn't buy
       if (!this.save.unlocked.includes(def.spec.id)) this.cb.onSelectCar(this.save.carId, this.save.colorIdx);
       this.showTitle();
     });
@@ -138,11 +151,13 @@ export class Menus {
 
   showPause() {
     this.root.style.pointerEvents = 'auto';
+    const isDay = this.save.timeOfDay === 'day';
     this.root.innerHTML = `
       <div class="menu-screen pause-screen">
         <h2>PAUSED</h2>
         <div class="menu-buttons">
           <button id="p-resume" class="btn primary">RESUME</button>
+          <button id="p-mode" class="btn">SWITCH TO ${isDay ? '☾ NIGHT (OUTLAW HEAT)' : '☀ DAY (OFFICIAL RACES)'}</button>
           <button id="p-garage" class="btn">CHANGE CAR (GARAGE)</button>
           <button id="p-settings" class="btn">RETRO / AUDIO OPTIONS</button>
           <button id="p-title" class="btn">QUIT TO TITLE</button>
@@ -150,6 +165,10 @@ export class Menus {
       </div>
     `;
     this.root.querySelector('#p-resume')!.addEventListener('click', () => this.cb.onResume());
+    this.root.querySelector('#p-mode')!.addEventListener('click', () => {
+      this.cb.onToggleTimeOfDay?.();
+      this.showPause();
+    });
     this.root.querySelector('#p-garage')!.addEventListener('click', () => this.cb.onOpenGarage());
     this.root.querySelector('#p-settings')!.addEventListener('click', () => this.showSettings(() => this.showPause()));
     this.root.querySelector('#p-title')!.addEventListener('click', () => this.showTitle());
@@ -199,6 +218,12 @@ export class Menus {
           <label><input type="checkbox" id="o-ps1" ${r.ps1 ? 'checked' : ''}/> PS1 VERTEX WOBBLE (BONUS)</label>
 
           <div class="opt-group-header">GAMEPLAY</div>
+          <label>TIME OF DAY
+            <select id="o-tod">
+              <option value="day" ${this.save.timeOfDay === 'day' ? 'selected' : ''}>☀ DAY (Speedhunter Official Races)</option>
+              <option value="night" ${this.save.timeOfDay === 'night' ? 'selected' : ''}>☾ NIGHT (Outlaw Police Pursuits)</option>
+            </select>
+          </label>
           <label>TRAFFIC DENSITY <input type="range" id="o-traf" min="10" max="55" value="${this.save.trafficDensity}"/></label>
         </div>
         <div class="menu-buttons"><button id="o-back" class="btn primary">APPLY &amp; BACK</button></div>
@@ -237,6 +262,8 @@ export class Menus {
       r.bloom = (this.root.querySelector('#o-bloom') as HTMLInputElement).checked;
       r.scanlines = (this.root.querySelector('#o-scan') as HTMLInputElement).checked;
       r.ps1 = (this.root.querySelector('#o-ps1') as HTMLInputElement).checked;
+      const tod = (this.root.querySelector('#o-tod') as HTMLSelectElement).value;
+      this.save.timeOfDay = tod === 'night' ? 'night' : 'day';
       this.save.trafficDensity = Number((this.root.querySelector('#o-traf') as HTMLInputElement).value);
       this.cb.onSettingsChanged();
     };

@@ -61,10 +61,25 @@ describe('city generation', () => {
     expect(c.graph.onRoad(c.spawn.x, c.spawn.z)).toBe(true);
   });
 
-  it('city spans the configured size', () => {
+  it('city spans 1.5 x 1.5 km and includes several curved roads', () => {
     const c = generateCity(1);
     const xs = c.intersections.map((i) => i.x);
-    expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(CITY.N * CITY.SPACING);
+    const zs = c.intersections.map((i) => i.z);
+    const spanX = Math.max(...xs) - Math.min(...xs);
+    const spanZ = Math.max(...zs) - Math.min(...zs);
+    expect(spanX).toBeCloseTo(CITY.N * CITY.SPACING);
+    expect(spanZ).toBeCloseTo(CITY.N * CITY.SPACING);
+    expect(spanX).toBeGreaterThanOrEqual(1480);
+    expect(spanX).toBeLessThanOrEqual(1550);
     expect(c.intersections[interId(CITY.N / 2, CITY.N / 2)].x).toBe(0);
+
+    // Verify curved roads are generated and drivable
+    expect(c.curvedRoads.length).toBeGreaterThanOrEqual(5);
+    const curveSegs = c.segments.filter((s) => s.curve);
+    expect(curveSegs.length).toBe(c.curvedRoads.length * 6);
+    for (const cr of c.curvedRoads) {
+      const midPt = cr.points[Math.floor(cr.points.length / 2)];
+      expect(c.graph.onRoad(midPt.x, midPt.z)).toBe(true);
+    }
   });
 });

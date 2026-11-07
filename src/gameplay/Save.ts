@@ -2,6 +2,8 @@ import { defaultRetro, type RetroSettings } from '../render/RenderPipeline';
 
 const KEY = 'neon_district_save_v1';
 
+export type TimeOfDay = 'day' | 'night';
+
 export interface SaveData {
   cash: number;
   bestHeat: number;
@@ -16,6 +18,7 @@ export interface SaveData {
   musicVolume: number;
   vehicleVolume: number;
   sfxVolume: number;
+  timeOfDay: TimeOfDay;
 }
 
 const defaults = (): SaveData => ({
@@ -32,6 +35,7 @@ const defaults = (): SaveData => ({
   musicVolume: 0.70,
   vehicleVolume: 0.85,
   sfxVolume: 0.85,
+  timeOfDay: 'day',
 });
 
 export function loadSave(): SaveData {
@@ -50,6 +54,7 @@ export function loadSave(): SaveData {
       sfxVolume: typeof p.sfxVolume === 'number' ? p.sfxVolume : (p.sfx === false ? 0 : d.sfxVolume),
       music: typeof p.musicVolume === 'number' ? p.musicVolume > 0 : (p.music ?? true),
       sfx: typeof p.sfxVolume === 'number' ? p.sfxVolume > 0 : (p.sfx ?? true),
+      timeOfDay: p.timeOfDay === 'night' || p.timeOfDay === 'day' ? p.timeOfDay : d.timeOfDay,
     };
   } catch {
     return defaults();

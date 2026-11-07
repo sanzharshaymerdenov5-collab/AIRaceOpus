@@ -38,6 +38,14 @@ export class TrafficSystem {
     this.units.length = 0;
   }
 
+  clearNear(x: number, z: number, radius: number) {
+    for (let i = this.units.length - 1; i >= 0; i--) {
+      if (Math.hypot(this.units[i].car.x - x, this.units[i].car.z - z) < radius) {
+        this.remove(i);
+      }
+    }
+  }
+
   private remove(idx: number) {
     const u = this.units[idx];
     this.group.remove(u.rig.root);

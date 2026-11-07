@@ -45,9 +45,37 @@ await page.waitForTimeout(1200);
 await page.screenshot({ path: `${OUT}/03-driving.png` });
 await page.keyboard.up('ShiftLeft');
 
+// Start an Official Speedhunter Race in Day Mode and showcase a curved road with AI racers
+await page.evaluate(() => {
+  const g = window.game;
+  g.applyTimeOfDay('day', false);
+  g.races.start(1, g.player); // Canyon S-Curve Showdown
+  g.races.active.countdown = 0;
+  const cr = g.layout.curvedRoads[0];
+  const p0 = cr.points[4];
+  const p1 = cr.points[6];
+  const yaw = Math.atan2(p1.x - p0.x, p1.z - p0.z);
+  g.player.teleport(p0.x, p0.z, yaw);
+  g.player.setForwardSpeed(28);
+  g.chaseCam.snap(g.player);
+  g.races.active.opponents.forEach((opp, idx) => {
+    const pt = cr.points[6 + idx * 2];
+    const ptNext = cr.points[7 + idx * 2];
+    opp.car.teleport(pt.x, pt.z, Math.atan2(ptNext.x - pt.x, ptNext.z - pt.z));
+    opp.car.setForwardSpeed(26);
+  });
+});
+await page.waitForTimeout(450);
+await page.screenshot({ path: `${OUT}/06-race-curved-road.png` });
+await page.evaluate(() => {
+  const g = window.game;
+  g.races.finish(false);
+});
+
 // Trigger a ★3 police pursuit and bring cruisers into close formation
 await page.evaluate(() => {
   const g = window.game;
+  g.applyTimeOfDay('night', false);
   g.heat.forceStars(3);
   g.police.lastKnown = { x: g.player.x, z: g.player.z, vx: 0, vz: 20 };
 });

@@ -1,8 +1,10 @@
-import { CITY, type CityLayout } from '../city/CityLayout';
+import { CITY, CURVE_ZONES, lineCoord, type CityLayout } from '../city/CityLayout';
 import type { PoliceSystem } from '../ai/PoliceSystem';
 import type { TrafficUnit } from '../ai/TrafficSystem';
 import type { HeatSystem } from '../gameplay/HeatSystem';
 import type { JobSystem } from '../gameplay/JobSystem';
+import type { RaceSystem } from '../gameplay/RaceSystem';
+import type { TimeOfDay } from '../gameplay/Save';
 import type { ArcadeVehicle } from '../physics/ArcadeVehicle';
 import { Minimap } from './Minimap';
 import { clamp } from '../core/rng';
@@ -14,11 +16,15 @@ interface Toast {
   ttl: number;
 }
 
+const ORD = ['1ST', '2ND', '3RD', '4TH'];
+
 /**
  * DOM + Canvas HUD:
  * - Analog PS2 tachometer/speedometer dial + digital km/h + gear + nitro arc.
+ * - Day/Night mode badge (Speedhunter Showdown vs Outlaw Night).
+ * - Official Race telemetry (Position 1..4, Lap, Checkpoint, Timer) & Outlaw Jobs.
  * - Wanted stars, busted / cooldown bars, pull-over prompt.
- * - Health bar, cash, district name, crime feed and center screen banners.
+ * - Health bar, cash, district / curved road name, crime feed and center screen banners.
  */
 export class HUD {
   readonly root: HTMLElement;
@@ -27,6 +33,7 @@ export class HUD {
   private starsEl: HTMLElement;
   private cashEl: HTMLElement;
   private distEl: HTMLElement;
+  private modeEl: HTMLElement;
   private healthFill: HTMLElement;
   private barWrap: HTMLElement;
   private barLabel: HTMLElement;
@@ -47,6 +54,7 @@ export class HUD {
       <div class="hud-top-left">
         <canvas id="minimap-canvas"></canvas>
         <div class="district-tag" id="hud-district">DOWNTOWN</div>
+        <div class="mode-tag day" id="hud-mode">☀ DAY · SPEEDHUNTER [T]</div>
       </div>
       <div class="hud-top-right">
         <div class="wanted-stars" id="hud-stars"></div>
@@ -65,7 +73,7 @@ export class HUD {
       <div class="hud-bottom-right">
         <canvas id="dial-canvas" width="220" height="220"></canvas>
       </div>
-      <div class="hud-controls-hint">[WASD/Arrows] Drive · [Space] Drift · [Shift] Nitro · [C] Cam · [H] Horn · [R] Reset · [Esc] Pause</div>
+      <div class="hud-controls-hint">[WASD/Arrows] Drive · [Space] Drift · [Shift] Nitro · [E] Start Race/Job · [T] Day/Night · [C] Cam · [R] Reset · [Esc] Pause</div>
     `;
     container.appendChild(this.root);
 
@@ -74,6 +82,7 @@ export class HUD {
     this.starsEl = this.root.querySelector('#hud-stars')!;
     this.cashEl = this.root.querySelector('#hud-cash')!;
     this.distEl = this.root.querySelector('#hud-district')!;
+    this.modeEl = this.root.querySelector('#hud-mode')!;
     this.healthFill = this.root.querySelector('#hud-health')!;
     this.barWrap = this.root.querySelector('#hud-bar-wrap')!;
     this.barLabel = this.root.querySelector('#hud-bar-label')!;
@@ -118,6 +127,8 @@ export class HUD {
     cops: PoliceSystem,
     traffic: TrafficUnit[],
     jobs: JobSystem,
+    races: RaceSystem,
+    timeOfDay: TimeOfDay,
     fps: number,
   ) {
     // Banner + toast decay
@@ -137,10 +148,35 @@ export class HUD {
     this.healthFill.style.width = `${Math.round(clamp(health01, 0, 1) * 100)}%`;
     this.healthFill.style.background = health01 > 0.5 ? '#2ee67a' : health01 > 0.25 ? '#ffb000' : '#ff2a40';
 
-    // District label
-    const dc = Math.max(Math.abs(car.x), Math.abs(car.z)) / CITY.SPACING;
-    this.distEl.textContent =
-      dc > CITY.N / 2 - 0.6 ? 'RING HIGHWAY' : dc <= 2 ? 'NEON DOWNTOWN' : car.x > CITY.SPACING * 2.5 ? 'CARGO DOCKS' : 'WEST SUBURBS';
+    // Mode badge
+    if (timeOfDay === 'day') {
+      this.modeEl.textContent = '☀ DAY · SPEEDHUNTER [T]';
+      this.modeEl.className = 'mode-tag day';
+    } else {
+      this.modeEl.textContent = '☾ NIGHT · OUTLAW HEAT [T]';
+      this.modeEl.className = 'mode-tag night';
+    }
+
+    // District / Curved road label
+    let curveName = '';
+    for (const cz of CURVE_ZONES) {
+      if (
+        car.x >= lineCoord(cz.i0) - 8 &&
+        car.x <= lineCoord(cz.i0 + 2) + 8 &&
+        car.z >= lineCoord(cz.j0) - 8 &&
+        car.z <= lineCoord(cz.j0 + 2) + 8
+      ) {
+        curveName = cz.name;
+        break;
+      }
+    }
+    if (curveName) {
+      this.distEl.textContent = curveName;
+    } else {
+      const dc = Math.max(Math.abs(car.x), Math.abs(car.z)) / CITY.SPACING;
+      this.distEl.textContent =
+        dc > CITY.N / 2 - 0.6 ? 'RING HIGHWAY' : dc <= 2.5 ? 'PALM DOWNTOWN' : car.x > CITY.SPACING * 3 ? 'HARBOR DOCKS' : 'WEST SUBURBS';
+    }
 
     // Wanted stars
     const flash = Math.floor(time * 7) % 2 === 0;
@@ -171,8 +207,22 @@ export class HUD {
       this.barWrap.style.display = 'none';
     }
 
-    // Job panel + start prompt
-    if (jobs.active) {
+    // Official Race panel or Outlaw Job panel
+    if (races.active) {
+      const r = races.active;
+      const posStr = ORD[r.playerPosition - 1] ?? `${r.playerPosition}TH`;
+      const lapInfo =
+        r.def.kind === 'circuit'
+          ? `LAP ${r.lap}/${r.def.laps} · CP ${r.cpIndex + 1}/${r.def.checkpoints.length}`
+          : `SPRINT · CP ${r.cpIndex + 1}/${r.def.checkpoints.length}`;
+      const prize = r.def.prizes[r.playerPosition - 1] ?? 500;
+      this.jobEl.style.display = 'block';
+      this.jobEl.innerHTML = `
+        <div class="job-title" style="color:#ff2a6d">🏁 ${r.def.name}</div>
+        <div class="job-sub">${lapInfo} · PRIZE $${prize.toLocaleString()}</div>
+        <div class="job-time">${posStr} / 4 · ${r.elapsed.toFixed(1)}s</div>
+      `;
+    } else if (jobs.active) {
       const j = jobs.active;
       const extra =
         j.type === 'smash'
@@ -185,7 +235,13 @@ export class HUD {
     } else {
       this.jobEl.style.display = 'none';
     }
-    if (jobs.nearSpot && !jobs.active) {
+
+    // Start prompt
+    if (races.nearRace && !races.active && !jobs.active) {
+      const d = races.nearRace.def;
+      this.promptEl.style.display = 'block';
+      this.promptEl.textContent = `PRESS [E] OR [ENTER] · OFFICIAL RACE: ${d.name} (1ST: $${d.prizes[0].toLocaleString()})`;
+    } else if (jobs.nearSpot && !jobs.active && !races.active) {
       this.promptEl.style.display = 'block';
       this.promptEl.textContent = `PRESS [E] OR [ENTER] TO START ${jobs.nearSpot.type.toUpperCase()} JOB`;
     } else if (car.spikedTime > 0) {
@@ -195,7 +251,7 @@ export class HUD {
       this.promptEl.style.display = 'none';
     }
 
-    this.minimap.draw(car.x, car.z, car.yaw, cops, traffic, jobs, time);
+    this.minimap.draw(car.x, car.z, car.yaw, cops, traffic, jobs, races, time);
     this.drawDial(car);
   }
 

@@ -44,6 +44,28 @@ class GeoBuilder {
     this.quad([x0, y, z1], [x1, y, z1], [x1, y, z0], [x0, y, z0], [0, 1, 0], s ? [x0 * s, z1 * s, x1 * s, z0 * s] : [0, 0, 1, 1], c);
   }
 
+  /** Ribbon strip between two curve points A and B with right-hand normals rA and rB, for off0 < off1. */
+  ribbon(
+    ax: number,
+    az: number,
+    rax: number,
+    raz: number,
+    bx: number,
+    bz: number,
+    rbx: number,
+    rbz: number,
+    off0: number,
+    off1: number,
+    y: number,
+    c: THREE.Color,
+  ) {
+    const p0 = [ax + rax * off0, y, az + raz * off0];
+    const p1 = [ax + rax * off1, y, az + raz * off1];
+    const p2 = [bx + rbx * off1, y, bz + rbz * off1];
+    const p3 = [bx + rbx * off0, y, bz + rbz * off0];
+    this.quad(p0, p1, p2, p3, [0, 1, 0], [0, 0, 1, 1], c);
+  }
+
   /** Axis-aligned box walls (4 sides) with world-scaled UVs. */
   walls(cx: number, y0: number, cz: number, w: number, h: number, d: number, c: THREE.Color, uS: number, vS: number, uOff = 0) {
     const x0 = cx - w / 2;
@@ -99,6 +121,8 @@ export class CityBuilder {
   private signalHeads: SignalHead[] = [];
   private signalCache: string[] = [];
   private beacons: THREE.Mesh[] = [];
+  private wallMats: THREE.MeshLambertMaterial[] = [];
+  private isDay = false;
   private col = new THREE.Color();
 
   constructor(
@@ -113,8 +137,17 @@ export class CityBuilder {
     this.buildBoundary();
   }
 
+  setTimeOfDay(mode: 'day' | 'night') {
+    this.isDay = mode === 'day';
+    for (const mat of this.wallMats) {
+      mat.emissiveIntensity = this.isDay ? 0.08 : 1.25;
+    }
+    const rl = this.group.getObjectByName('roofLights') as THREE.InstancedMesh | undefined;
+    if (rl && this.isDay) rl.visible = false;
+  }
+
   private buildGround() {
-    const size = CITY.HALF * 2 + 400;
+    const size = CITY.HALF * 2 + 450;
     const tex = makeAsphaltTexture();
     tex.repeat.set(size / 12, size / 12);
     const ground = new THREE.Mesh(new THREE.PlaneGeometry(size, size), lambert({ map: tex, color: 0x9a9aa6 }));
@@ -133,6 +166,36 @@ export class CityBuilder {
     for (const b of this.layout.blocks) {
       const x0 = b.cx - B / 2;
       const z0 = b.cz - B / 2;
+      if (b.curved) {
+        // Subdivide curved-corridor blocks into 5x5 park turf tiles outside the curved road
+        const sub = 5;
+        const step = B / sub;
+        for (let sx = 0; sx < sub; sx++) {
+          for (let sz = 0; sz < sub; sz++) {
+            const px0 = x0 + sx * step + 1;
+            const pz0 = z0 + sz * step + 1;
+            const px1 = px0 + step - 2;
+            const pz1 = pz0 + step - 2;
+            const mcx = (px0 + px1) / 2;
+            const mcz = (pz0 + pz1) / 2;
+            let clear = true;
+            for (const cr of this.layout.curvedRoads) {
+              for (const pt of cr.points) {
+                if (Math.hypot(pt.x - mcx, pt.z - mcz) < CITY.ROAD / 2 + step * 0.72) {
+                  clear = false;
+                  break;
+                }
+              }
+              if (!clear) break;
+            }
+            if (clear) {
+              side.flat(px0 - 0.8, pz0 - 0.8, px1 + 0.8, pz1 + 0.8, curb, cSide, 1 / 8);
+              grass.flat(px0, pz0, px1, pz1, curb + 0.02, cGrass, 1 / 6);
+            }
+          }
+        }
+        continue;
+      }
       side.flat(x0, z0, x0 + B, z0 + B, curb, cSide, 1 / 8);
       side.walls(b.cx, 0, b.cz, B, curb, B, new THREE.Color(0xb0b0b0), 1 / 8, 1 / 8);
       if (b.district === 'park' || b.district === 'suburbs') {
@@ -140,13 +203,37 @@ export class CityBuilder {
         grass.flat(x0 + inset, z0 + inset, x0 + B - inset, z0 + B - inset, curb + 0.02, cGrass, 1 / 6);
       }
     }
-    // plazas over removed road segments
+
+    // Build continuous curved sidewalks along each curved road
+    const h = CITY.ROAD / 2;
+    const swWidth = 2.6;
+    for (const cr of this.layout.curvedRoads) {
+      const pts = cr.points;
+      const normals: { x: number; z: number }[] = [];
+      for (let i = 0; i < pts.length; i++) {
+        const prev = pts[Math.max(0, i - 1)];
+        const next = pts[Math.min(pts.length - 1, i + 1)];
+        const tx = next.x - prev.x;
+        const tz = next.z - prev.z;
+        const len = Math.hypot(tx, tz) || 1;
+        normals.push({ x: -tz / len, z: tx / len });
+      }
+      for (let i = 0; i < pts.length - 1; i++) {
+        const A = pts[i];
+        const B = pts[i + 1];
+        const rA = normals[i];
+        const rB = normals[i + 1];
+        side.ribbon(A.x, A.z, rA.x, rA.z, B.x, B.z, rB.x, rB.z, h + 0.4, h + 0.4 + swWidth, curb * 0.85, cSide);
+        side.ribbon(A.x, A.z, rA.x, rA.z, B.x, B.z, rB.x, rB.z, -(h + 0.4 + swWidth), -(h + 0.4), curb * 0.85, cSide);
+      }
+    }
+
+    // Plazas over removed road segments
     const plaza = new GeoBuilder();
     for (const s of this.layout.segments) {
       if (!s.removed) continue;
       const A = this.layout.intersections[s.a];
       const Bn = this.layout.intersections[s.b];
-      const h = CITY.ROAD / 2;
       if (s.axis === 'x') plaza.flat(A.x + h, A.z - h, Bn.x - h, A.z + h, 0.06, cSide, 1 / 4);
       else plaza.flat(A.x - h, A.z + h, A.x + h, Bn.z - h, 0.06, cSide, 1 / 4);
     }
@@ -160,15 +247,16 @@ export class CityBuilder {
     const m = new GeoBuilder();
     const white = new THREE.Color(0xd8d8d0);
     const yellow = new THREE.Color(0xe0b020);
+    const kerbRed = new THREE.Color(0xe62e3d);
+    const kerbWhite = new THREE.Color(0xf2f2f2);
     const y = 0.025;
     const h = CITY.ROAD / 2;
     for (const s of this.layout.segments) {
-      if (s.removed) continue;
+      if (s.removed || s.curve) continue;
       const A = this.layout.intersections[s.a];
       const B = this.layout.intersections[s.b];
       const len = Math.hypot(B.x - A.x, B.z - A.z) - CITY.ROAD;
       const along = (t: number, off: number, l: number, w: number, c: THREE.Color) => {
-        // rectangle centred at road position (t along, off across)
         if (s.axis === 'x') m.flat(A.x + h + t, A.z + off - w / 2, A.x + h + t + l, A.z + off + w / 2, y, c);
         else m.flat(A.x + off - w / 2, A.z + h + t, A.x + off + w / 2, A.z + h + t + l, y, c);
       };
@@ -190,6 +278,37 @@ export class CityBuilder {
         for (let k = -h + 1; k < h - 0.5; k += 1.4) along(end, k + 0.35, 3, 0.7, white);
       }
     }
+
+    // Smooth curved road markings + red/white motorsport apex kerbs
+    for (const cr of this.layout.curvedRoads) {
+      const pts = cr.points;
+      const normals: { x: number; z: number }[] = [];
+      for (let i = 0; i < pts.length; i++) {
+        const prev = pts[Math.max(0, i - 1)];
+        const next = pts[Math.min(pts.length - 1, i + 1)];
+        const tx = next.x - prev.x;
+        const tz = next.z - prev.z;
+        const len = Math.hypot(tx, tz) || 1;
+        normals.push({ x: -tz / len, z: tx / len });
+      }
+      for (let i = 0; i < pts.length - 1; i++) {
+        const A = pts[i];
+        const B = pts[i + 1];
+        const rA = normals[i];
+        const rB = normals[i + 1];
+        // Double yellow centre line
+        m.ribbon(A.x, A.z, rA.x, rA.z, B.x, B.z, rB.x, rB.z, -0.28, -0.1, y, yellow);
+        m.ribbon(A.x, A.z, rA.x, rA.z, B.x, B.z, rB.x, rB.z, 0.1, 0.28, y, yellow);
+        // Outer white edge lines
+        m.ribbon(A.x, A.z, rA.x, rA.z, B.x, B.z, rB.x, rB.z, h - 0.7, h - 0.52, y, white);
+        m.ribbon(A.x, A.z, rA.x, rA.z, B.x, B.z, rB.x, rB.z, -(h - 0.52), -(h - 0.7), y, white);
+        // Alternating red & white racing apex rumble kerbs along the curve shoulders
+        const kc = i % 2 === 0 ? kerbRed : kerbWhite;
+        m.ribbon(A.x, A.z, rA.x, rA.z, B.x, B.z, rB.x, rB.z, h - 0.4, h + 0.35, y + 0.015, kc);
+        m.ribbon(A.x, A.z, rA.x, rA.z, B.x, B.z, rB.x, rB.z, -(h + 0.35), -(h - 0.4), y + 0.015, kc);
+      }
+    }
+
     const mat = lambert({ vertexColors: true, emissive: 0x222222, polygonOffset: true, polygonOffsetFactor: -1 });
     this.group.add(new THREE.Mesh(m.build(), mat));
   }
@@ -214,14 +333,12 @@ export class CityBuilder {
       walls[st].walls(b.x, 0, b.z, b.w, b.h, b.d, c, uS, vS, uOff);
       const rc = new THREE.Color(0x3a3b40).lerp(c, 0.15);
       roofs.flat(b.x - b.w / 2, b.z - b.d / 2, b.x + b.w / 2, b.z + b.d / 2, b.h, rc);
-      // parapet + rooftop clutter
       if (st !== 'suburbs') {
         for (let k = 0; k < (st === 'downtown' ? 3 : 2); k++) {
           const w = 2 + rnd() * 5;
           roofs.box(b.x + (rnd() - 0.5) * (b.w - w), b.h, b.z + (rnd() - 0.5) * (b.d - w), w, 1 + rnd() * 3, w, rc.clone().multiplyScalar(0.8));
         }
       } else {
-        // pitched-roof look: a smaller dark box on top
         roofs.box(b.x, b.h, b.z, b.w * 0.8, 1.6, b.d * 0.8, new THREE.Color(0x4a2f2a));
       }
       if (st === 'downtown' && b.h > 70) roofLights.push(new THREE.Vector3(b.x, b.h + 1.5, b.z));
@@ -237,7 +354,6 @@ export class CityBuilder {
         else if (face === 1) neon.box(b.x, sy, b.z - b.d / 2 - off, sw, sh, 0.3, nc);
         else if (face === 2) neon.box(b.x + b.w / 2 + off, sy, b.z, 0.3, sh, sw, nc);
         else neon.box(b.x - b.w / 2 - off, sy, b.z, 0.3, sh, sw, nc);
-        // rooftop neon strip
         if (st === 'downtown' && rnd() < 0.5) neon.box(b.x, b.h, b.z + b.d / 2 + 0.1, b.w, 0.4, 0.2, nc);
       }
       this.phys.addStaticBox(b.x, b.h / 2, b.z, b.w / 2, b.h / 2, b.d / 2);
@@ -245,6 +361,7 @@ export class CityBuilder {
     for (const st of styles) {
       const [map, em] = makeWindowTextures(st, st.length * 31);
       const mat = lambert({ map, emissiveMap: em, emissive: 0xffffff, emissiveIntensity: 1.25, vertexColors: true });
+      this.wallMats.push(mat);
       this.group.add(new THREE.Mesh(walls[st].build(), mat));
     }
     this.group.add(new THREE.Mesh(roofs.build(), lambert({ vertexColors: true })));
@@ -268,7 +385,6 @@ export class CityBuilder {
     for (const I of this.layout.intersections) {
       if (!I.hasLights) continue;
       for (const l of this.layout.graph.incoming[I.id]) {
-        // pole on the near-right corner of the approach
         const rx = -l.dz;
         const rz = l.dx;
         const px = I.x - l.dx * off + rx * off;
@@ -276,7 +392,6 @@ export class CityBuilder {
         const yaw = Math.atan2(-l.dx, -l.dz);
         q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
         poles.push(new THREE.Matrix4().compose(new THREE.Vector3(px, 0, pz), q, new THREE.Vector3(1, 1, 1)));
-        // head hangs over the lane
         const hx = px - rx * 3.2;
         const hz = pz - rz * 3.2;
         heads.push(new THREE.Matrix4().compose(new THREE.Vector3(hx, 5.4, hz), q, new THREE.Vector3(1, 1, 1)));
@@ -284,7 +399,6 @@ export class CityBuilder {
         this.phys.addStaticBox(px, 2.5, pz, 0.15, 2.5, 0.15);
       }
     }
-    // Pole with arm (merged)
     const poleGeo = new THREE.BoxGeometry(0.22, 6, 0.22).translate(0, 3, 0);
     const armGeo = new THREE.BoxGeometry(3.6, 0.16, 0.16);
     const poleMat = lambert({ color: 0x3a3d42 });
@@ -295,7 +409,6 @@ export class CityBuilder {
     const housing = new THREE.InstancedMesh(new THREE.BoxGeometry(0.5, 1.3, 0.4), lambert({ color: 0x1a1a1a }), heads.length);
     this.signalMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.42, 0.42, 0.12), basic({ color: 0xffffff, toneMapped: false }), heads.length);
     heads.forEach((h, i) => {
-      // arm midpoint between pole and head
       const pp = new THREE.Vector3().setFromMatrixPosition(poles[i]);
       const hp = new THREE.Vector3().setFromMatrixPosition(h);
       const mid = pp.clone().add(hp).multiplyScalar(0.5);
@@ -359,7 +472,7 @@ export class CityBuilder {
     }
     if (dirty && this.signalMesh.instanceColor) this.signalMesh.instanceColor.needsUpdate = true;
     const rl = this.group.getObjectByName('roofLights') as THREE.InstancedMesh | undefined;
-    if (rl) rl.visible = Math.sin(time * 3) > 0;
+    if (rl) rl.visible = !this.isDay && Math.sin(time * 3) > 0;
     for (const b of this.beacons) b.rotation.y = time * 0.5;
   }
 }

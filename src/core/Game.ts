@@ -10,7 +10,7 @@ import { ArcadeVehicle } from '../physics/ArcadeVehicle';
 import { PLAYER_CARS } from '../vehicles/carSpecs';
 import { animateCarRig, buildCarMesh, setCarColor, type CarRig } from '../vehicles/CarMeshFactory';
 import { RenderPipeline } from '../render/RenderPipeline';
-import { createSky, FOG_COLOR } from '../render/Sky';
+import { createSky, DAY_FOG_COLOR, FOG_COLOR, setSkyTimeOfDay } from '../render/Sky';
 import { ParticleSystem } from '../render/Particles';
 import { ChaseCamera } from '../render/ChaseCamera';
 import { InputManager } from '../input/InputManager';
@@ -18,7 +18,8 @@ import { TrafficSystem, type TrafficUnit } from '../ai/TrafficSystem';
 import { PoliceSystem } from '../ai/PoliceSystem';
 import { HeatSystem } from '../gameplay/HeatSystem';
 import { JobSystem } from '../gameplay/JobSystem';
-import { loadSave, writeSave, type SaveData } from '../gameplay/Save';
+import { RaceSystem } from '../gameplay/RaceSystem';
+import { loadSave, writeSave, type SaveData, type TimeOfDay } from '../gameplay/Save';
 import { AudioEngine } from '../audio/AudioEngine';
 import { HUD } from '../ui/HUD';
 import { Menus } from '../ui/Menus';
@@ -34,6 +35,8 @@ const CRIME_LABELS: Record<CrimeType, string> = {
   rammingCop: 'ASSAULT ON POLICE',
   evading: 'FELONY EVASION',
 };
+
+const ORD_LABELS = ['1ST PLACE', '2ND PLACE', '3RD PLACE', '4TH PLACE'];
 
 export class Game {
   readonly bus = new EventBus();
@@ -51,6 +54,7 @@ export class Game {
   readonly police: PoliceSystem;
   readonly heat: HeatSystem;
   readonly jobs: JobSystem;
+  readonly races: RaceSystem;
   readonly chaseCam = new ChaseCamera();
   readonly hud: HUD;
   readonly menus: Menus;
@@ -62,6 +66,8 @@ export class Game {
   playerRig!: CarRig;
   health = 100;
   private sky: THREE.Group;
+  private hemiLight: THREE.HemisphereLight;
+  private dirLight: THREE.DirectionalLight;
 
   // Crime detection timers
   private speedCrimeCd = 0;
@@ -75,11 +81,11 @@ export class Game {
     this.pipeline = new RenderPipeline(canvas, this.save.retro);
     this.scene.fog = new THREE.FogExp2(FOG_COLOR, this.save.retro.fogDensity);
 
-    // Night lighting: cool moonlight + warm street bounce hemisphere + player headlight spot
-    this.scene.add(new THREE.HemisphereLight(0x4460a8, 0x2c2218, 0.85));
-    const moon = new THREE.DirectionalLight(0x9bb8ff, 0.75);
-    moon.position.set(-120, 220, -160);
-    this.scene.add(moon);
+    this.hemiLight = new THREE.HemisphereLight(0x4460a8, 0x2c2218, 0.85);
+    this.scene.add(this.hemiLight);
+    this.dirLight = new THREE.DirectionalLight(0x9bb8ff, 0.75);
+    this.dirLight.position.set(-120, 220, -160);
+    this.scene.add(this.dirLight);
     this.sky = createSky();
     this.scene.add(this.sky);
 
@@ -91,11 +97,22 @@ export class Game {
     this.police = new PoliceSystem(this.layout, this.phys);
     this.heat = new HeatSystem(this.bus);
     this.jobs = new JobSystem(this.layout, this.heat, this.bus, (x, z, c) => this.city.addBeacon(x, z, c));
+    this.races = new RaceSystem(this.layout, this.phys, this.bus, (freq, dur) => this.audio.beep(freq, dur));
 
-    this.scene.add(this.city.group, this.props.group, this.traffic.group, this.police.group, this.jobs.group, this.particles.group);
+    this.scene.add(
+      this.city.group,
+      this.props.group,
+      this.traffic.group,
+      this.police.group,
+      this.jobs.group,
+      this.races.group,
+      this.particles.group,
+    );
 
     this.spawnPlayer(this.save.carId, this.save.colorIdx);
     this.hud = new HUD(uiRoot, this.layout);
+    this.applyTimeOfDay(this.save.timeOfDay, false);
+
     this.menus = new Menus(uiRoot, this.save, {
       onStartDrive: () => this.enterRoam(),
       onOpenGarage: () => this.enterGarage(),
@@ -110,9 +127,10 @@ export class Game {
         return true;
       },
       onResume: () => this.setState('roam'),
+      onToggleTimeOfDay: () => this.toggleTimeOfDay(this.state === 'roam'),
       onSettingsChanged: () => {
         this.pipeline.resize();
-        (this.scene.fog as THREE.FogExp2).density = this.save.retro.fogDensity;
+        this.applyTimeOfDay(this.save.timeOfDay, false);
         this.traffic.targetCount = this.save.trafficDensity;
         this.audio.setVolumes(this.save.masterVolume, this.save.musicVolume, this.save.vehicleVolume, this.save.sfxVolume);
         writeSave(this.save);
@@ -137,6 +155,49 @@ export class Game {
     this.setState('title');
     this.loop = new Loop((dt) => this.step(dt), (_, fdt) => this.render(fdt));
     this.loop.start();
+  }
+
+  applyTimeOfDay(mode: TimeOfDay, announce = true) {
+    this.save.timeOfDay = mode;
+    writeSave(this.save);
+    setSkyTimeOfDay(this.sky, mode);
+    this.city.setTimeOfDay(mode);
+
+    const fog = this.scene.fog as THREE.FogExp2;
+    if (mode === 'day') {
+      this.scene.background = DAY_FOG_COLOR;
+      fog.color.copy(DAY_FOG_COLOR);
+      fog.density = this.save.retro.fogDensity * 0.36;
+      this.hemiLight.color.setHex(0x9ad8ff);
+      this.hemiLight.groundColor.setHex(0x6e6254);
+      this.hemiLight.intensity = 1.55;
+      this.dirLight.color.setHex(0xfff4dc);
+      this.dirLight.intensity = 1.75;
+      this.dirLight.position.set(220, 380, 180);
+    } else {
+      this.scene.background = FOG_COLOR;
+      fog.color.copy(FOG_COLOR);
+      fog.density = this.save.retro.fogDensity;
+      this.hemiLight.color.setHex(0x4460a8);
+      this.hemiLight.groundColor.setHex(0x2c2218);
+      this.hemiLight.intensity = 0.85;
+      this.dirLight.color.setHex(0x9bb8ff);
+      this.dirLight.intensity = 0.75;
+      this.dirLight.position.set(-120, 220, -160);
+    }
+
+    if (announce && this.hud) {
+      if (mode === 'day') {
+        this.hud.banner('SPEEDHUNTER SHOWDOWN', 'DAY MODE · FIND PINK FESTIVAL ARCHES FOR OFFICIAL RACES', '#ff2a6d', 2.6);
+      } else {
+        this.hud.banner('NIGHT OUTLAW MODE', 'HIGH HEAT PURSUITS & UNDERGROUND JOBS ACTIVE', '#05d9e8', 2.6);
+      }
+    }
+  }
+
+  toggleTimeOfDay(announce = true) {
+    const next: TimeOfDay = this.save.timeOfDay === 'day' ? 'night' : 'day';
+    this.applyTimeOfDay(next, announce);
   }
 
   private spawnPlayer(carId: string, colorIdx: number) {
@@ -189,13 +250,18 @@ export class Game {
     if (!this.save.unlocked.includes(this.player.spec.id)) this.spawnPlayer(this.save.carId, this.save.colorIdx);
     writeSave(this.save);
     this.setState('roam');
-    this.hud.banner('NEON DISTRICT', 'FREE ROAM — DRIVE RECKLESSLY OR FIND A BEACON', '#ffae00', 2.4);
+    if (this.save.timeOfDay === 'day') {
+      this.hud.banner('SPEEDHUNTER SHOWDOWN', 'DAY MODE — DRIVE TO ANY FESTIVAL ARCH FOR OFFICIAL RACES', '#ff2a6d', 2.6);
+    } else {
+      this.hud.banner('NEON DISTRICT', 'NIGHT OUTLAW — DRIVE RECKLESSLY OR FIND A BEACON', '#ffae00', 2.4);
+    }
   }
 
   enterGarage() {
     this.audio.unlock();
     this.heat.resetClean();
     this.jobs.finish(false);
+    this.races.finish(false);
     this.setState('garage');
   }
 
@@ -246,8 +312,10 @@ export class Game {
       this.particles.sparks(x, 0.8, z, 10);
       this.audio.crash(0.25);
       this.save.cash += 15;
-      const wit = this.police.isWitnessed(this.player.x, this.player.z, this.props.cameras);
-      this.heat.reportCrime('propertyDamage', wit);
+      if (this.save.timeOfDay === 'night' && !this.races.active) {
+        const wit = this.police.isWitnessed(this.player.x, this.player.z, this.props.cameras);
+        this.heat.reportCrime('propertyDamage', wit);
+      }
     });
     this.bus.on('jobStarted', ({ name }) => {
       this.hud.banner(name, 'GO GO GO!', '#05d9e8', 2);
@@ -263,6 +331,19 @@ export class Game {
         this.hud.banner(`${name} FAILED`, 'TRY AGAIN AT ANY BEACON', '#ff2035', 2.4);
         this.audio.stinger(false);
       }
+    });
+    this.bus.on('raceEnded', ({ name, position, reward, time }) => {
+      this.save.cash += reward;
+      writeSave(this.save);
+      const ord = ORD_LABELS[position - 1] ?? `${position}TH PLACE`;
+      const col = position === 1 ? '#39ff7a' : position <= 3 ? '#ffc800' : '#ff5566';
+      this.hud.banner(
+        `${ord} · +$${reward.toLocaleString()}`,
+        `${name} FINISHED IN ${time.toFixed(1)}s`,
+        col,
+        3.2,
+      );
+      this.audio.stinger(position <= 3);
     });
     this.bus.on('message', ({ text, sub, color, time }) => this.hud.banner(text, sub ?? '', color ?? '#05d9e8', time ?? 1.8));
   }
@@ -298,7 +379,8 @@ export class Game {
     if (this.input.wasPressed('KeyC')) this.chaseCam.cycleMode();
     if (this.input.wasPressed('KeyH')) this.audio.horn();
     if (this.input.wasPressed('KeyR')) this.respawnPlayer();
-    const startJob = this.input.wasPressed('KeyE') || this.input.wasPressed('Enter');
+    if (this.input.wasPressed('KeyT')) this.toggleTimeOfDay(true);
+    const startEvent = this.input.wasPressed('KeyE') || this.input.wasPressed('Enter');
 
     this.player.input = this.input.drive(dt);
     this.player.update(dt);
@@ -309,13 +391,22 @@ export class Game {
     this.police.update(dt, this.time, this.player, this.heat);
     this.props.update(this.player.x, this.player.z, this.time);
 
+    // Update Official Races and Outlaw Jobs
+    this.races.update(dt, this.time, this.player, startEvent, !this.jobs.active, (x, z, r) => this.traffic.clearNear(x, z, r));
+    if (!this.races.active) {
+      this.jobs.update(dt, this.time, this.player.x, this.player.z, startEvent && !this.races.nearRace);
+    } else if (this.save.timeOfDay === 'day' && this.heat.stars > 0) {
+      // Sanctioned Day Mode races keep police clear of the course
+      this.heat.resetClean();
+    }
+
     this.phys.step();
     this.handleCollisions(dt);
     this.detectContinuousCrimes(dt);
 
     // Self-righting / out-of-bounds guard
     if (Math.abs(this.player.x) > CITY.HALF + 60 || Math.abs(this.player.z) > CITY.HALF + 60) this.respawnPlayer();
-    if (Math.abs(this.player.speed) < 0.5 && this.player.input.throttle > 0.5) {
+    if (Math.abs(this.player.speed) < 0.5 && this.player.input.throttle > 0.5 && (!this.races.active || this.races.active.countdown <= 0)) {
       this.flippedFor += dt;
       if (this.flippedFor > 4) (this.respawnPlayer(), (this.flippedFor = 0));
     } else this.flippedFor = 0;
@@ -340,7 +431,6 @@ export class Game {
       nearestCopDist: this.police.nearestDist,
       copSeesPlayer: this.police.anySees,
     });
-    this.jobs.update(dt, this.time, this.player.x, this.player.z, startJob);
     this.city.update(this.time);
     this.particles.update(dt);
 
@@ -385,7 +475,20 @@ export class Game {
       this.police.nearestSiren,
     );
 
-    this.hud.update(dt, this.time, this.player, this.health / 100, this.save.cash, this.heat, this.police, this.traffic.units, this.jobs, this.loop.fps);
+    this.hud.update(
+      dt,
+      this.time,
+      this.player,
+      this.health / 100,
+      this.save.cash,
+      this.heat,
+      this.police,
+      this.traffic.units,
+      this.jobs,
+      this.races,
+      this.save.timeOfDay,
+      this.loop.fps,
+    );
     this.input.endFrame();
   }
 
@@ -401,7 +504,9 @@ export class Game {
       if (!ent) return;
       if (ent.kind === 'traffic') {
         hitKind = 'traffic';
-        this.traffic.notifyHit(ent.ref as TrafficUnit);
+        if (ent.ref && 'crashedFor' in (ent.ref as TrafficUnit)) {
+          this.traffic.notifyHit(ent.ref as TrafficUnit);
+        }
       } else if (ent.kind === 'cop') {
         hitKind = 'cop';
       } else if (ent.kind === 'static' && !hitKind) {
@@ -423,8 +528,10 @@ export class Game {
       this.health = Math.max(0, this.health - sev * 0.85 * armor);
 
       const wit = this.police.isWitnessed(this.player.x, this.player.z, this.props.cameras);
-      if (hitKind === 'cop') this.heat.reportCrime('rammingCop', true);
-      else if (hitKind === 'traffic' && Math.abs(this.player.speed) > 5.5) this.heat.reportCrime('hitAndRun', wit);
+      if (hitKind === 'cop' && !this.races.active) this.heat.reportCrime('rammingCop', true);
+      else if (hitKind === 'traffic' && Math.abs(this.player.speed) > 5.5 && this.save.timeOfDay === 'night' && !this.races.active) {
+        this.heat.reportCrime('hitAndRun', wit);
+      }
 
       if (this.health <= 0) {
         this.bus.emit('wrecked', {});
@@ -438,6 +545,9 @@ export class Game {
   }
 
   private detectContinuousCrimes(dt: number) {
+    // In Day Mode or during an Official Speedhunter Race, roads are sanctioned for racing (like NFS Heat)
+    if (this.save.timeOfDay === 'day' || this.races.active) return;
+
     const px = this.player.x;
     const pz = this.player.z;
     const sp = Math.abs(this.player.speed);
@@ -486,7 +596,7 @@ export class Game {
     }
   }
 
-  private render(frameDt: number) {
+  private render(_frameDt: number) {
     if (this.state === 'title' || this.state === 'garage') {
       const a = this.time * (this.state === 'garage' ? 0.65 : 0.25);
       const r = this.state === 'garage' ? 5.2 : 10;
@@ -495,7 +605,6 @@ export class Game {
       this.chaseCam.cam.fov = 50;
       this.chaseCam.cam.updateProjectionMatrix();
       this.chaseCam.cam.position.set(this.player.x + Math.cos(a) * r, h, this.player.z + Math.sin(a) * r);
-      // In garage, pan look-at slightly to the car's left so the car appears on the right side of the screen
       const pan = this.state === 'garage' ? -1.4 : 0;
       this.chaseCam.cam.lookAt(this.player.x - Math.sin(a) * pan, 0.85, this.player.z + Math.cos(a) * pan);
       this.pipeline.speedBlur = 0;

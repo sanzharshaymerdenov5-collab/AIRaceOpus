@@ -26,6 +26,8 @@ export interface GameEvents {
   cash: { delta: number; reason: string };
   jobStarted: { name: string };
   jobEnded: { name: string; success: boolean; reward: number };
+  raceStarted: { name: string; kind: 'circuit' | 'sprint'; laps: number };
+  raceEnded: { name: string; position: number; reward: number; time: number };
   nitro: { active: boolean };
 }
 

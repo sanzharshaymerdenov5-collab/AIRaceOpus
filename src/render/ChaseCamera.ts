@@ -6,7 +6,7 @@ export type CamMode = 'chase' | 'far' | 'hood';
 const MODES: CamMode[] = ['chase', 'far', 'hood'];
 
 export class ChaseCamera {
-  readonly cam = new THREE.PerspectiveCamera(62, 16 / 9, 0.4, 950);
+  readonly cam = new THREE.PerspectiveCamera(62, 16 / 9, 0.4, 1800);
   mode: CamMode = 'chase';
   private yaw = 0;
   private pos = new THREE.Vector3();

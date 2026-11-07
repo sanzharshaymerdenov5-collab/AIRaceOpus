@@ -1,8 +1,8 @@
 import { Rng } from '../core/rng';
 
-/** World-scale constants for the grid city. */
+/** World-scale constants for the 1.5 km × 1.5 km city. */
 export const CITY = {
-  N: 12, // blocks per side
+  N: 16, // blocks per side -> 16 * 94m = 1504m (~1.5 km × 1.5 km)
   BLOCK: 80, // block interior size (m)
   ROAD: 14, // road width (m)
   LANE_OFFSET: 3.5, // lane centre offset from road centre (m)
@@ -29,6 +29,7 @@ export interface Intersection {
   degree: number;
   hasLights: boolean;
   lightOffset: number;
+  curve?: boolean;
 }
 
 export interface Segment {
@@ -38,6 +39,8 @@ export interface Segment {
   axis: Axis;
   removed: boolean;
   ring: boolean;
+  curve?: boolean;
+  curveId?: number;
 }
 
 export interface Lane {
@@ -62,6 +65,7 @@ export interface Block {
   cx: number;
   cz: number;
   district: District;
+  curved?: boolean;
 }
 
 export interface Building {
@@ -84,27 +88,104 @@ export interface PropSpec {
   rot: number;
 }
 
+export interface CurvedRoad {
+  id: number;
+  name: string;
+  style: 'arc' | 'scurve';
+  i0: number;
+  j0: number;
+  points: { x: number; z: number }[];
+  nodeIds: number[];
+}
+
+export interface OfficialRaceDef {
+  id: string;
+  name: string;
+  kind: 'circuit' | 'sprint';
+  laps: number;
+  startX: number;
+  startZ: number;
+  startYaw: number;
+  prizes: [number, number, number];
+  checkpoints: { x: number; z: number }[];
+}
+
 export interface CityLayout {
   seed: number;
   intersections: Intersection[];
   segments: Segment[];
+  curvedRoads: CurvedRoad[];
   blocks: Block[];
   buildings: Building[];
   props: PropSpec[];
   graph: RoadGraph;
   jobSpots: { x: number; z: number; type: 'getaway' | 'sprint' | 'smash' }[];
+  raceSpots: OfficialRaceDef[];
   spawn: { x: number; z: number; yaw: number };
 }
 
 export const interId = (i: number, j: number) => j * (CITY.N + 1) + i;
 export const lineCoord = (i: number) => (i - CITY.N / 2) * CITY.SPACING;
 
-/** Directed lane graph over the street grid. Pure data, unit-testable. */
+function cubicBezier(
+  p0: { x: number; z: number },
+  p1: { x: number; z: number },
+  p2: { x: number; z: number },
+  p3: { x: number; z: number },
+  t: number,
+): { x: number; z: number } {
+  const u = 1 - t;
+  const b0 = u * u * u;
+  const b1 = 3 * u * u * t;
+  const b2 = 3 * u * t * t;
+  const b3 = t * t * t;
+  return {
+    x: b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x,
+    z: b0 * p0.z + b1 * p1.z + b2 * p2.z + b3 * p3.z,
+  };
+}
+
+function distToSegmentSq(px: number, pz: number, ax: number, az: number, bx: number, bz: number): number {
+  const vx = bx - ax;
+  const vz = bz - az;
+  const lenSq = vx * vx + vz * vz;
+  if (lenSq < 1e-6) return (px - ax) * (px - ax) + (pz - az) * (pz - az);
+  const t = Math.max(0, Math.min(1, ((px - ax) * vx + (pz - az) * vz) / lenSq));
+  const qx = ax + t * vx;
+  const qz = az + t * vz;
+  return (px - qx) * (px - qx) + (pz - qz) * (pz - qz);
+}
+
+interface CurveZoneSpec {
+  id: number;
+  name: string;
+  style: 'arc' | 'scurve';
+  i0: number;
+  j0: number;
+  start: [number, number];
+  end: [number, number];
+  corner?: [number, number];
+}
+
+export const CURVE_ZONES: CurveZoneSpec[] = [
+  // 4 outer orbital beltway curves rounding the 4 quadrants of the 1.5 km city
+  { id: 0, name: 'CANYON ESSES', style: 'scurve', i0: 1, j0: 2, start: [1, 4], end: [3, 2] },
+  { id: 1, name: 'BAYVIEW SWEEPER', style: 'arc', i0: 13, j0: 2, start: [13, 2], end: [15, 4], corner: [15, 2] },
+  { id: 2, name: 'HARBOR HAIRPIN', style: 'arc', i0: 13, j0: 12, start: [15, 12], end: [13, 14], corner: [15, 14] },
+  { id: 3, name: 'SUNSET PARABOLICA', style: 'arc', i0: 1, j0: 12, start: [3, 14], end: [1, 12], corner: [1, 14] },
+  // 2 inner technical S-curves through park & midtown corridors
+  { id: 4, name: 'EMERALD PARK BEND', style: 'scurve', i0: 3, j0: 9, start: [3, 11], end: [5, 9] },
+  { id: 5, name: 'EASTSIDE CHICANE', style: 'scurve', i0: 10, j0: 4, start: [10, 6], end: [12, 4] },
+];
+
+/** Directed lane graph over the street grid and curved road segments. Pure data, unit-testable. */
 export class RoadGraph {
   readonly lanes: Lane[] = [];
   readonly outgoing: Lane[][] = [];
   readonly incoming: Lane[][] = [];
   private segLookup = new Map<string, Segment>();
+  private curveSegments: Segment[] = [];
+  private curveIntersections: Intersection[] = [];
 
   constructor(
     readonly intersections: Intersection[],
@@ -114,9 +195,13 @@ export class RoadGraph {
       this.outgoing.push([]);
       this.incoming.push([]);
     }
+    for (const I of intersections) {
+      if (I.curve) this.curveIntersections.push(I);
+    }
     for (const s of segments) {
       this.segLookup.set(s.a < s.b ? `${s.a}-${s.b}` : `${s.b}-${s.a}`, s);
       if (s.removed) continue;
+      if (s.curve) this.curveSegments.push(s);
       this.addLane(s, s.a, s.b);
       this.addLane(s, s.b, s.a);
     }
@@ -145,7 +230,7 @@ export class RoadGraph {
       dx,
       dz,
       len: len0 - CITY.ROAD,
-      limit: s.ring ? CITY.HIGHWAY_LIMIT : CITY.STREET_LIMIT,
+      limit: s.ring || s.curve ? CITY.HIGHWAY_LIMIT : CITY.STREET_LIMIT,
       axis: s.axis,
     };
     this.lanes.push(lane);
@@ -194,19 +279,32 @@ export class RoadGraph {
     const S = CITY.SPACING;
     const i = Math.max(0, Math.min(CITY.N, Math.round(x / S + CITY.N / 2)));
     const j = Math.max(0, Math.min(CITY.N, Math.round(z / S + CITY.N / 2)));
-    return this.intersections[interId(i, j)];
+    let best = this.intersections[interId(i, j)] ?? this.intersections[0];
+    let bestD = Math.hypot(best.x - x, best.z - z);
+    for (const c of this.curveIntersections) {
+      const d = Math.hypot(c.x - x, c.z - z);
+      if (d < bestD) {
+        bestD = d;
+        best = c;
+      }
+    }
+    return best;
   }
 
   /**
    * Endpoints of the road segment a point is on, ordered by heading (fx, fz).
    * `ahead` is the intersection the car is driving towards, `behind` the one it came from.
-   * Inside an intersection box both are that intersection. Prevents AI from planning
-   * a route that starts at an already-passed node (which causes mid-block U-turns).
    */
   aheadIntersection(x: number, z: number, fx: number, fz: number): { ahead: number; behind: number } {
     const I = this.nearestIntersection(x, z);
     const h = CITY.ROAD / 2 + 1;
     if (Math.abs(x - I.x) <= h && Math.abs(z - I.z) <= h) return { ahead: I.id, behind: I.id };
+
+    const near = this.nearestLane(x, z, fx, fz);
+    if (this.segments[near.lane.seg]?.curve && near.dist <= CITY.ROAD) {
+      return { ahead: near.lane.to, behind: near.lane.from };
+    }
+
     const S = CITY.SPACING;
     const N = CITY.N;
     const gx = x / S + N / 2;
@@ -216,7 +314,6 @@ export class RoadGraph {
     const offX = Math.abs(x - lineCoord(ix));
     const offZ = Math.abs(z - lineCoord(jz));
     if (offX <= offZ) {
-      // On a north-south street (constant x)
       const j0 = Math.max(0, Math.min(N - 1, Math.floor(gz)));
       const a = interId(ix, j0);
       const b = interId(ix, j0 + 1);
@@ -235,10 +332,28 @@ export class RoadGraph {
     return Math.abs(x - I.x) <= h && Math.abs(z - I.z) <= h ? I.id : -1;
   }
 
-  /** True if point lies on drivable asphalt (roads + intersections, excluding plazas). */
+  /** True if point lies on drivable asphalt (grid roads, curved roads, or intersections, excluding plazas). */
   onRoad(x: number, z: number): boolean {
     const S = CITY.SPACING;
     const h = CITY.ROAD / 2;
+    const hSq = h * h;
+
+    // 1. Check curved road segments first
+    for (const s of this.curveSegments) {
+      const A = this.intersections[s.a];
+      const B = this.intersections[s.b];
+      if (distToSegmentSq(x, z, A.x, A.z, B.x, B.z) <= hSq) return true;
+    }
+
+    // If inside the interior of a 2x2 curve zone, straight cross lines are replaced by the curve
+    for (const cz of CURVE_ZONES) {
+      const xMin = lineCoord(cz.i0) + h;
+      const xMax = lineCoord(cz.i0 + 2) - h;
+      const zMin = lineCoord(cz.j0) + h;
+      const zMax = lineCoord(cz.j0 + 2) - h;
+      if (x > xMin && x < xMax && z > zMin && z < zMax) return false;
+    }
+
     const gx = x / S + CITY.N / 2;
     const gz = z / S + CITY.N / 2;
     const ix = Math.round(gx);
@@ -266,7 +381,7 @@ export class RoadGraph {
   }
 }
 
-/** Build the full city layout from a seed. Deterministic, no rendering. */
+/** Build the full 1.5 km × 1.5 km city layout with curved roads and official race tracks from a seed. */
 export function generateCity(seed = 1337): CityLayout {
   const rng = new Rng(seed);
   const N = CITY.N;
@@ -284,33 +399,137 @@ export function generateCity(seed = 1337): CityLayout {
         lightOffset: rng.range(0, 24),
       });
 
+  // Identify interior nodes of the 6 2x2 curved road corridors
+  const curveInteriorNodes = new Set<number>();
+  const curveProtectedNodes = new Set<number>();
+  for (const cz of CURVE_ZONES) {
+    curveInteriorNodes.add(interId(cz.i0 + 1, cz.j0 + 1));
+    for (let di = 0; di <= 2; di++)
+      for (let dj = 0; dj <= 2; dj++) curveProtectedNodes.add(interId(cz.i0 + di, cz.j0 + dj));
+  }
+
   const segments: Segment[] = [];
   const isRing = (i: number, j: number, axis: Axis) =>
     axis === 'x' ? j === 0 || j === N : i === 0 || i === N;
   for (let j = 0; j <= N; j++)
     for (let i = 0; i <= N; i++) {
-      if (i < N)
-        segments.push({ id: segments.length, a: interId(i, j), b: interId(i + 1, j), axis: 'x', removed: false, ring: isRing(i, j, 'x') });
-      if (j < N)
-        segments.push({ id: segments.length, a: interId(i, j), b: interId(i, j + 1), axis: 'z', removed: false, ring: isRing(i, j, 'z') });
+      if (i < N) {
+        const a = interId(i, j);
+        const b = interId(i + 1, j);
+        // Skip interior axis-aligned cross-segments replaced by a curved road
+        if (!curveInteriorNodes.has(a) && !curveInteriorNodes.has(b)) {
+          segments.push({ id: segments.length, a, b, axis: 'x', removed: false, ring: isRing(i, j, 'x') });
+        }
+      }
+      if (j < N) {
+        const a = interId(i, j);
+        const b = interId(i, j + 1);
+        if (!curveInteriorNodes.has(a) && !curveInteriorNodes.has(b)) {
+          segments.push({ id: segments.length, a, b, axis: 'z', removed: false, ring: isRing(i, j, 'z') });
+        }
+      }
     }
 
-  // Degree count, then remove a few interior segments to make plazas.
+  // Construct the 6 curved roads (each 6 segments across a 2x2 block corridor)
+  const curvedRoads: CurvedRoad[] = [];
+  for (const cz of CURVE_ZONES) {
+    const startId = interId(cz.start[0], cz.start[1]);
+    const endId = interId(cz.end[0], cz.end[1]);
+    const midId = interId(cz.i0 + 1, cz.j0 + 1);
+    const p0 = { x: intersections[startId].x, z: intersections[startId].z };
+    const p3 = { x: intersections[endId].x, z: intersections[endId].z };
+
+    let p1: { x: number; z: number };
+    let p2: { x: number; z: number };
+    if (cz.style === 'arc' && cz.corner) {
+      const cx = lineCoord(cz.corner[0]);
+      const czCoord = lineCoord(cz.corner[1]);
+      p1 = { x: p0.x + (cx - p0.x) * 0.56, z: p0.z + (czCoord - p0.z) * 0.56 };
+      p2 = { x: p3.x + (cx - p3.x) * 0.56, z: p3.z + (czCoord - p3.z) * 0.56 };
+    } else {
+      const dx = p3.x - p0.x;
+      const dz = p3.z - p0.z;
+      const len = Math.hypot(dx, dz);
+      const nx = -dz / len;
+      const nz = dx / len;
+      const bow = 58;
+      p1 = { x: p0.x + dx * 0.33 + nx * bow, z: p0.z + dz * 0.33 + nz * bow };
+      p2 = { x: p0.x + dx * 0.67 - nx * bow, z: p0.z + dz * 0.67 - nz * bow };
+    }
+
+    // 6 graph segments along the curve: t = 0, 1/6, 2/6, 3/6 (midId), 4/6, 5/6, 1
+    const steps = 6;
+    const nodeIds: number[] = [startId];
+    intersections[startId].curve = true;
+    intersections[endId].curve = true;
+    for (let s = 1; s < steps; s++) {
+      const pt = cubicBezier(p0, p1, p2, p3, s / steps);
+      if (s === 3) {
+        const M = intersections[midId];
+        M.x = pt.x;
+        M.z = pt.z;
+        M.curve = true;
+        nodeIds.push(midId);
+      } else {
+        const id = intersections.length;
+        intersections.push({
+          id,
+          i: cz.i0 + 1,
+          j: cz.j0 + 1,
+          x: pt.x,
+          z: pt.z,
+          degree: 0,
+          hasLights: false,
+          lightOffset: 0,
+          curve: true,
+        });
+        nodeIds.push(id);
+      }
+    }
+    nodeIds.push(endId);
+
+    for (let k = 0; k < nodeIds.length - 1; k++) {
+      const A = intersections[nodeIds[k]];
+      const B = intersections[nodeIds[k + 1]];
+      const axis: Axis = Math.abs(B.x - A.x) >= Math.abs(B.z - A.z) ? 'x' : 'z';
+      segments.push({
+        id: segments.length,
+        a: A.id,
+        b: B.id,
+        axis,
+        removed: false,
+        ring: false,
+        curve: true,
+        curveId: cz.id,
+      });
+    }
+
+    // High-res polyline for rendering smooth curved asphalt, kerbs, and markings
+    const points: { x: number; z: number }[] = [];
+    const visSteps = 24;
+    for (let v = 0; v <= visSteps; v++) {
+      points.push(cubicBezier(p0, p1, p2, p3, v / visSteps));
+    }
+    curvedRoads.push({ id: cz.id, name: cz.name, style: cz.style, i0: cz.i0, j0: cz.j0, points, nodeIds });
+  }
+
+  // Degree count, then remove a few interior straight segments to make pedestrian plazas.
   const deg = new Array(intersections.length).fill(0);
   for (const s of segments) {
     deg[s.a]++;
     deg[s.b]++;
   }
-  let toRemove = 9;
+  let toRemove = 12;
   let guard = 0;
-  while (toRemove > 0 && guard++ < 500) {
+  while (toRemove > 0 && guard++ < 600) {
     const s = rng.pick(segments);
-    if (s.removed || s.ring) continue;
+    if (s.removed || s.ring || s.curve) continue;
+    if (curveProtectedNodes.has(s.a) || curveProtectedNodes.has(s.b)) continue;
     const A = intersections[s.a];
     const B = intersections[s.b];
-    // keep a clear "main avenue" cross through the centre
-    if (A.i === N / 2 && B.i === N / 2) continue;
-    if (A.j === N / 2 && B.j === N / 2) continue;
+    // keep clear main avenue crosses through the centre and inner 6th avenue
+    if ((A.i === N / 2 && B.i === N / 2) || (A.i === 6 && B.i === 6)) continue;
+    if ((A.j === N / 2 && B.j === N / 2) || (A.j === 6 && B.j === 6)) continue;
     if (deg[s.a] < 4 || deg[s.b] < 4) continue;
     s.removed = true;
     deg[s.a]--;
@@ -319,10 +538,22 @@ export function generateCity(seed = 1337): CityLayout {
   }
   for (const I of intersections) {
     I.degree = deg[I.id];
-    I.hasLights = I.degree >= 3 && !(I.i === 0 || I.i === N || I.j === 0 || I.j === N);
+    I.hasLights = !I.curve && I.degree >= 3 && !(I.i === 0 || I.i === N || I.j === 0 || I.j === N);
   }
 
   const graph = new RoadGraph(intersections, segments);
+
+  // Helper to check if a candidate building or prop is too close to any curved road
+  const nearCurvedRoad = (x: number, z: number, margin: number): boolean => {
+    const rSq = (CITY.ROAD / 2 + margin) * (CITY.ROAD / 2 + margin);
+    for (const s of segments) {
+      if (!s.curve) continue;
+      const A = intersections[s.a];
+      const B = intersections[s.b];
+      if (distToSegmentSq(x, z, A.x, A.z, B.x, B.z) <= rSq) return true;
+    }
+    return false;
+  };
 
   // Blocks & districts
   const blocks: Block[] = [];
@@ -331,17 +562,32 @@ export function generateCity(seed = 1337): CityLayout {
   const S = CITY.SPACING;
   const B = CITY.BLOCK;
   const SW = CITY.SIDEWALK;
+
   for (let bj = 0; bj < N; bj++)
     for (let bi = 0; bi < N; bi++) {
       const cx = (bi + 0.5 - N / 2) * S;
       const cz = (bj + 0.5 - N / 2) * S;
+      const isCurvedBlock = CURVE_ZONES.some((z) => bi >= z.i0 && bi <= z.i0 + 1 && bj >= z.j0 && bj <= z.j0 + 1);
       const dc = Math.max(Math.abs(bi + 0.5 - N / 2), Math.abs(bj + 0.5 - N / 2));
       let district: District;
-      if (dc <= 2) district = 'downtown';
+      if (isCurvedBlock) district = 'park';
+      else if (dc <= 2.5) district = 'downtown';
       else if (bi >= N - 3) district = 'industrial';
       else district = 'suburbs';
-      if (district !== 'downtown' && rng.chance(district === 'suburbs' ? 0.1 : 0.04)) district = 'park';
-      blocks.push({ bi, bj, cx, cz, district });
+      if (!isCurvedBlock && district !== 'downtown' && rng.chance(district === 'suburbs' ? 0.1 : 0.04)) district = 'park';
+      blocks.push({ bi, bj, cx, cz, district, curved: isCurvedBlock });
+
+      if (isCurvedBlock) {
+        // Scenic trees in the safe outer corners of the curved road corridor
+        for (let k = 0; k < 10; k++) {
+          const tx = cx + rng.range(-32, 32);
+          const tz = cz + rng.range(-32, 32);
+          if (!nearCurvedRoad(tx, tz, 6.5) && !graph.onRoad(tx, tz)) {
+            props.push({ type: 'tree', x: tx, z: tz, rot: 0 });
+          }
+        }
+        continue;
+      }
 
       const inner = B - SW * 2; // usable lot area
       const x0 = cx - inner / 2;
@@ -391,7 +637,6 @@ export function generateCity(seed = 1337): CityLayout {
         for (let a = 0; a < n; a++)
           for (let b = 0; b < n; b++) {
             if (a === 1 && b === 1) {
-              // backyard trees in the middle lot
               props.push({ type: 'tree', x: x0 + cell * 1.5, z: z0 + cell * 1.5, rot: 0 });
               continue;
             }
@@ -423,7 +668,6 @@ export function generateCity(seed = 1337): CityLayout {
       // Street furniture on sidewalks around the block (1.4 m in from the curb)
       const edge = B / 2 - 1.4;
       const sides: [number, number, number, number, number][] = [
-        // [startX, startZ, dirX, dirZ, rotation]
         [cx - B / 2 + 8, cz - edge, 1, 0, 0],
         [cx - B / 2 + 8, cz + edge, 1, 0, Math.PI],
         [cx - edge, cz - B / 2 + 8, 0, 1, Math.PI / 2],
@@ -448,9 +692,32 @@ export function generateCity(seed = 1337): CityLayout {
       }
     }
 
+  // Place street lamps along both sides of each curved road
+  for (const cr of curvedRoads) {
+    const pts = cr.points;
+    for (let idx = 3; idx < pts.length - 3; idx += 4) {
+      const pPrev = pts[idx - 1];
+      const pNext = pts[idx + 1];
+      const p = pts[idx];
+      const tx = pNext.x - pPrev.x;
+      const tz = pNext.z - pPrev.z;
+      const len = Math.hypot(tx, tz) || 1;
+      const rx = -tz / len;
+      const rz = tx / len;
+      const off = CITY.ROAD / 2 + 2.2;
+      for (const side of [-1, 1]) {
+        const lx = p.x + rx * off * side;
+        const lz = p.z + rz * off * side;
+        if (!graph.onRoad(lx, lz)) {
+          props.push({ type: 'lamp', x: lx, z: lz, rot: Math.atan2(-rx * side, -rz * side) });
+        }
+      }
+    }
+  }
+
   // Speed cameras on random interior segments
-  const live = segments.filter((s) => !s.removed);
-  for (let k = 0; k < 12; k++) {
+  const live = segments.filter((s) => !s.removed && !s.curve);
+  for (let k = 0; k < 16; k++) {
     const s = rng.pick(live);
     const A = intersections[s.a];
     const Bi = intersections[s.b];
@@ -464,22 +731,125 @@ export function generateCity(seed = 1337): CityLayout {
     );
   }
 
-  // Job spots: placed on road segments mid-points spread around the city
+  // Night Outlaw Job spots spread around the city
   const jobSpots: CityLayout['jobSpots'] = [];
   const types: ('getaway' | 'sprint' | 'smash')[] = ['getaway', 'sprint', 'smash', 'getaway', 'sprint', 'smash'];
   const anchors = [
-    [3, 3],
-    [9, 3],
-    [3, 9],
-    [9, 9],
-    [6, 2],
-    [2, 6],
+    [4, 4],
+    [12, 4],
+    [4, 12],
+    [12, 12],
+    [8, 3],
+    [3, 8],
   ];
   anchors.forEach(([i, j], k) => {
-    const s = graph.segmentBetween(interId(i, j), interId(i + 1, j));
-    const ii = s && !s.removed ? i : i;
-    jobSpots.push({ x: lineCoord(ii) + CITY.SPACING / 2, z: lineCoord(j), type: types[k] });
+    jobSpots.push({ x: lineCoord(i) + CITY.SPACING / 2, z: lineCoord(j), type: types[k] });
   });
+
+  // Official Speedhunter Showdown Sanctioned Races (Day Mode)
+  const ptAt = (i: number, j: number) => ({ x: lineCoord(i), z: lineCoord(j) });
+  const curveMid = (id: number) => {
+    const c = curvedRoads[id];
+    return c.points[Math.floor(c.points.length / 2)];
+  };
+  const raceSpots: OfficialRaceDef[] = [
+    {
+      id: 'palm_gp',
+      name: 'PALM CITY GRAND PRIX',
+      kind: 'circuit',
+      laps: 2,
+      startX: lineCoord(8) + CITY.LANE_OFFSET,
+      startZ: lineCoord(8) - 28,
+      startYaw: Math.PI, // heading North (-Z)
+      prizes: [6000, 3200, 1500],
+      checkpoints: [
+        ptAt(8, 4),
+        ptAt(10, 6),
+        curveMid(5), // Eastside Chicane curve
+        ptAt(12, 4),
+        ptAt(12, 8),
+        ptAt(8, 8),
+      ],
+    },
+    {
+      id: 'canyon_sprint',
+      name: 'CANYON S-CURVE SHOWDOWN',
+      kind: 'sprint',
+      laps: 1,
+      startX: lineCoord(6),
+      startZ: lineCoord(2) - CITY.LANE_OFFSET,
+      startYaw: -Math.PI / 2, // heading West (-X)
+      prizes: [4800, 2500, 1200],
+      checkpoints: [
+        ptAt(3, 2),
+        curveMid(0), // NW Canyon Esses curve
+        ptAt(1, 4),
+        ptAt(1, 8),
+        ptAt(3, 11),
+        curveMid(4), // Emerald Park Serpentine curve
+        ptAt(5, 9),
+        ptAt(8, 9),
+      ],
+    },
+    {
+      id: 'bayview_circuit',
+      name: 'BAYVIEW COASTAL DASH',
+      kind: 'circuit',
+      laps: 2,
+      startX: lineCoord(11),
+      startZ: lineCoord(2) + CITY.LANE_OFFSET,
+      startYaw: Math.PI / 2, // heading East (+X)
+      prizes: [5400, 2800, 1400],
+      checkpoints: [
+        ptAt(13, 2),
+        curveMid(1), // NE Bayview Sweeper curve
+        ptAt(15, 4),
+        ptAt(15, 8),
+        ptAt(12, 8),
+        ptAt(10, 6),
+        curveMid(5), // Eastside Chicane curve
+        ptAt(12, 4),
+      ],
+    },
+    {
+      id: 'sunset_parabolica',
+      name: 'SUNSET PARABOLICA SPRINT',
+      kind: 'sprint',
+      laps: 1,
+      startX: lineCoord(8),
+      startZ: lineCoord(14) - CITY.LANE_OFFSET,
+      startYaw: -Math.PI / 2, // heading West (-X)
+      prizes: [4500, 2400, 1100],
+      checkpoints: [
+        ptAt(3, 14),
+        curveMid(3), // SW Sunset Parabolica curve
+        ptAt(1, 12),
+        ptAt(1, 8),
+        ptAt(3, 11),
+        curveMid(4), // Emerald Park Serpentine curve
+        ptAt(5, 9),
+        ptAt(8, 8),
+      ],
+    },
+    {
+      id: 'harbor_ring',
+      name: 'HARBOR ORBITAL TOUR',
+      kind: 'circuit',
+      laps: 2,
+      startX: lineCoord(15) - CITY.LANE_OFFSET,
+      startZ: lineCoord(8),
+      startYaw: 0, // heading South (+Z)
+      prizes: [6500, 3500, 1700],
+      checkpoints: [
+        ptAt(15, 12),
+        curveMid(2), // SE Harbor Hairpin curve
+        ptAt(13, 14),
+        ptAt(9, 14),
+        ptAt(9, 8),
+        ptAt(15, 8),
+      ],
+    },
+  ];
 
   // Player spawn: right lane heading north just south of the centre
   const spawnLane = graph.outgoing[interId(N / 2, N / 2 + 1)].find((l) => l.to === interId(N / 2, N / 2))!;
@@ -489,5 +859,5 @@ export function generateCity(seed = 1337): CityLayout {
     yaw: Math.atan2(spawnLane.dx, spawnLane.dz),
   };
 
-  return { seed, intersections, segments, blocks, buildings, props, graph, jobSpots, spawn };
+  return { seed, intersections, segments, curvedRoads, blocks, buildings, props, graph, jobSpots, raceSpots, spawn };
 }

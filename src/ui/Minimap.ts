@@ -2,10 +2,11 @@ import { CITY, type CityLayout } from '../city/CityLayout';
 import type { CopUnit, PoliceSystem } from '../ai/PoliceSystem';
 import type { TrafficUnit } from '../ai/TrafficSystem';
 import type { JobSystem } from '../gameplay/JobSystem';
+import type { RaceSystem } from '../gameplay/RaceSystem';
 
 /**
- * Rotating top-down PS2-style radar: pre-renders the road network to an
- * offscreen canvas once, then blits it rotated under the player icon + cop cones + jobs.
+ * Rotating top-down PS2-style radar: pre-renders the 1.5x1.5 km road network (including curved roads)
+ * to an offscreen canvas once, then blits it rotated under the player icon + cop cones + jobs + AI racers.
  */
 export class Minimap {
   private ctx: CanvasRenderingContext2D;
@@ -39,11 +40,11 @@ export class Minimap {
       const s = CITY.BLOCK * S;
       g.fillRect(this.toMap(b.cx) - s / 2, this.toMap(b.cz) - s / 2, s, s);
     }
-    // roads
+    // straight grid roads
     g.strokeStyle = '#4a5568';
     g.lineCap = 'square';
     for (const seg of this.layout.segments) {
-      if (seg.removed) continue;
+      if (seg.removed || seg.curve) continue;
       const A = this.layout.intersections[seg.a];
       const B = this.layout.intersections[seg.b];
       g.lineWidth = (seg.ring ? CITY.ROAD * 1.15 : CITY.ROAD * 0.9) * S;
@@ -51,6 +52,25 @@ export class Minimap {
       g.beginPath();
       g.moveTo(this.toMap(A.x), this.toMap(A.z));
       g.lineTo(this.toMap(B.x), this.toMap(B.z));
+      g.stroke();
+    }
+    // smooth curved roads
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    for (const cr of this.layout.curvedRoads) {
+      if (!cr.points.length) continue;
+      // outer kerb highlight
+      g.lineWidth = CITY.ROAD * 1.25 * S;
+      g.strokeStyle = '#8b4a62';
+      g.beginPath();
+      g.moveTo(this.toMap(cr.points[0].x), this.toMap(cr.points[0].z));
+      for (let i = 1; i < cr.points.length; i++) {
+        g.lineTo(this.toMap(cr.points[i].x), this.toMap(cr.points[i].z));
+      }
+      g.stroke();
+      // asphalt core
+      g.lineWidth = CITY.ROAD * 0.92 * S;
+      g.strokeStyle = '#5a6680';
       g.stroke();
     }
   }
@@ -62,6 +82,7 @@ export class Minimap {
     cops: PoliceSystem,
     traffic: TrafficUnit[],
     jobs: JobSystem,
+    races: RaceSystem,
     time: number,
   ) {
     const ctx = this.ctx;
@@ -91,14 +112,57 @@ export class Minimap {
       ctx.fill();
     };
 
-    // Job spots or active objective
-    if (!jobs.active) {
+    // Official Race spots, Job spots, or active objective
+    if (races.active) {
+      const cps = races.active.def.checkpoints;
+      const cur = cps[races.active.cpIndex];
+      const next = cps[(races.active.cpIndex + 1) % cps.length];
+      if (cur) {
+        // Route line from player to current checkpoint & next checkpoint
+        ctx.strokeStyle = 'rgba(255, 42, 109, 0.75)';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo((cur.x - px) * scale, (cur.z - pz) * scale);
+        if (next) ctx.lineTo((next.x - px) * scale, (next.z - pz) * scale);
+        ctx.stroke();
+
+        dot(cur.x, cur.z, 5.5 + Math.sin(time * 9) * 1.5, '#ff2a6d');
+        dot(cur.x, cur.z, 2.5, '#ffffff');
+      }
+      // Draw AI race opponents
+      for (const opp of races.active.opponents) {
+        const ox = (opp.car.x - px) * scale;
+        const oz = (opp.car.z - pz) * scale;
+        ctx.save();
+        ctx.translate(ox, oz);
+        ctx.rotate(-opp.car.yaw + Math.PI);
+        ctx.fillStyle = opp.colorHex;
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(0, -5);
+        ctx.lineTo(4, 4);
+        ctx.lineTo(-4, 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    } else if (jobs.active) {
+      if (jobs.target) {
+        dot(jobs.target.x, jobs.target.z, 5 + Math.sin(time * 8) * 1.5, '#05d9e8');
+      }
+    } else {
+      // Idle markers for Official Races (neon pink/gold rings) and Outlaw Jobs
+      for (const r of this.layout.raceSpots) {
+        dot(r.startX, r.startZ, 5, '#ff2a6d');
+        dot(r.startX, r.startZ, 2.2, '#ffc800');
+      }
       for (const s of this.layout.jobSpots) {
         const col = s.type === 'getaway' ? '#ff2a6d' : s.type === 'sprint' ? '#05d9e8' : '#ffc800';
-        dot(s.x, s.z, 4, col);
+        dot(s.x, s.z, 3.6, col);
       }
-    } else if (jobs.target) {
-      dot(jobs.target.x, jobs.target.z, 5 + Math.sin(time * 8) * 1.5, '#05d9e8');
     }
 
     // Roadblocks
@@ -118,7 +182,6 @@ export class Minimap {
       ctx.beginPath();
       ctx.arc(lx, lz, pulse, 0, Math.PI * 2);
       ctx.stroke();
-      // crosshair + projected escape vector
       ctx.beginPath();
       ctx.moveTo(lx - 5, lz);
       ctx.lineTo(lx + 5, lz);
@@ -136,7 +199,6 @@ export class Minimap {
       const cz = (u.car.z - pz) * scale;
       if (u.state !== 'patrol') {
         if (u.state === 'search') {
-          // faint line showing the sector intersection the AI Director assigned this unit
           ctx.strokeStyle = 'rgba(80, 180, 255, 0.25)';
           ctx.lineWidth = 1;
           ctx.beginPath();
@@ -161,17 +223,19 @@ export class Minimap {
 
     ctx.restore();
 
-    // Target edge arrow if active job target is outside the radar circle
-    if (jobs.target) {
-      const dx = jobs.target.x - px;
-      const dz = jobs.target.z - pz;
+    // Target edge arrow if active race checkpoint or job target is outside the radar circle
+    const activeTarget = races.target ?? jobs.target;
+    const arrowColor = races.target ? '#ff2a6d' : '#05d9e8';
+    if (activeTarget) {
+      const dx = activeTarget.x - px;
+      const dz = activeTarget.z - pz;
       const ang = Math.atan2(dx, dz) - pyaw; // 0 = ahead (up)
       const dist = Math.hypot(dx, dz) * scale;
       if (dist > R - 10) {
         ctx.save();
         ctx.translate(R, R);
         ctx.rotate(-ang);
-        ctx.fillStyle = '#05d9e8';
+        ctx.fillStyle = arrowColor;
         ctx.beginPath();
         ctx.moveTo(0, -(R - 4));
         ctx.lineTo(-6, -(R - 14));
@@ -199,7 +263,7 @@ export class Minimap {
     ctx.restore();
 
     // Bezel
-    ctx.strokeStyle = '#ff9d00';
+    ctx.strokeStyle = races.active ? '#ff2a6d' : '#ff9d00';
     ctx.lineWidth = 3;
     ctx.beginPath();
     ctx.arc(R, R, R - 2, 0, Math.PI * 2);
