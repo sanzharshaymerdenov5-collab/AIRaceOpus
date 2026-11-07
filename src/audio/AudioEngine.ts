@@ -13,6 +13,7 @@ export class AudioEngine {
   private ctx: AudioContext | null = null;
   private master!: GainNode;
   private sfxGain!: GainNode;
+  private vehicleGain!: GainNode;
   private musicGain!: GainNode;
 
   // Engine nodes
@@ -38,24 +39,74 @@ export class AudioEngine {
   private stepTimer = 0;
   private stepIdx = 0;
 
-  sfxEnabled = true;
-  musicEnabled = true;
+  masterVolume = 0.85;
+  musicVolume = 0.70;
+  vehicleVolume = 0.85;
+  sfxVolume = 0.85;
+
+  get sfxEnabled(): boolean {
+    return this.sfxVolume > 0 || this.vehicleVolume > 0;
+  }
+  set sfxEnabled(v: boolean) {
+    if (!v) {
+      this.sfxVolume = 0;
+      this.vehicleVolume = 0;
+    } else {
+      if (this.sfxVolume === 0) this.sfxVolume = 0.85;
+      if (this.vehicleVolume === 0) this.vehicleVolume = 0.85;
+    }
+    this.applyVolumes();
+  }
+
+  get musicEnabled(): boolean {
+    return this.musicVolume > 0;
+  }
+  set musicEnabled(v: boolean) {
+    this.musicVolume = v ? (this.musicVolume > 0 ? this.musicVolume : 0.7) : 0;
+    this.applyVolumes();
+  }
+
+  setVolumes(master: number, music: number, vehicle: number, sfx = 0.85) {
+    this.masterVolume = clamp(master, 0, 1);
+    this.musicVolume = clamp(music, 0, 1);
+    this.vehicleVolume = clamp(vehicle, 0, 1);
+    this.sfxVolume = clamp(sfx, 0, 1);
+    this.applyVolumes();
+  }
+
+  applyVolumes() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    this.master.gain.setTargetAtTime(this.masterVolume, t, 0.02);
+    this.musicGain.gain.setTargetAtTime(this.musicVolume * 0.42, t, 0.02);
+    this.vehicleGain.gain.setTargetAtTime(this.vehicleVolume, t, 0.02);
+    this.sfxGain.gain.setTargetAtTime(this.sfxVolume, t, 0.02);
+  }
 
   /** Create or resume the audio graph (call from a user gesture). */
   unlock() {
     if (this.ctx) {
       if (this.ctx.state === 'suspended') this.ctx.resume();
+      this.applyVolumes();
       return;
     }
     const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     if (!AC) return;
     const ctx = (this.ctx = new AC());
     this.master = ctx.createGain();
-    this.master.gain.value = 0.7;
+    this.master.gain.value = this.masterVolume;
     this.master.connect(ctx.destination);
+
     this.sfxGain = ctx.createGain();
-    this.musicGain = ctx.createGain();
+    this.sfxGain.gain.value = this.sfxVolume;
     this.sfxGain.connect(this.master);
+
+    this.vehicleGain = ctx.createGain();
+    this.vehicleGain.gain.value = this.vehicleVolume;
+    this.vehicleGain.connect(this.master);
+
+    this.musicGain = ctx.createGain();
+    this.musicGain.gain.value = this.musicVolume * 0.42;
     this.musicGain.connect(this.master);
 
     // 2s white-noise buffer reused everywhere
@@ -63,13 +114,13 @@ export class AudioEngine {
     const d = this.noiseBuf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
 
-    // Engine chain
+    // Engine chain -> vehicleGain
     this.engFilter = ctx.createBiquadFilter();
     this.engFilter.type = 'lowpass';
     this.engFilter.frequency.value = 400;
     this.engGain = ctx.createGain();
     this.engGain.gain.value = 0;
-    this.engFilter.connect(this.engGain).connect(this.sfxGain);
+    this.engFilter.connect(this.engGain).connect(this.vehicleGain);
     this.engOsc1 = ctx.createOscillator();
     this.engOsc2 = ctx.createOscillator();
     this.engSub = ctx.createOscillator();
@@ -85,7 +136,7 @@ export class AudioEngine {
     this.engOsc2.start();
     this.engSub.start();
 
-    // Tyre screech: bandpass-filtered noise + highpitched whine
+    // Tyre screech: bandpass-filtered noise -> vehicleGain
     const scNoise = ctx.createBufferSource();
     scNoise.buffer = this.noiseBuf;
     scNoise.loop = true;
@@ -95,10 +146,10 @@ export class AudioEngine {
     scBp.Q.value = 5;
     this.screechGain = ctx.createGain();
     this.screechGain.gain.value = 0;
-    scNoise.connect(scBp).connect(this.screechGain).connect(this.sfxGain);
+    scNoise.connect(scBp).connect(this.screechGain).connect(this.vehicleGain);
     scNoise.start();
 
-    // Nitro hiss
+    // Nitro hiss -> vehicleGain
     const nNoise = ctx.createBufferSource();
     nNoise.buffer = this.noiseBuf;
     nNoise.loop = true;
@@ -108,10 +159,10 @@ export class AudioEngine {
     nBp.Q.value = 1.5;
     this.nitroGain = ctx.createGain();
     this.nitroGain.gain.value = 0;
-    nNoise.connect(nBp).connect(this.nitroGain).connect(this.sfxGain);
+    nNoise.connect(nBp).connect(this.nitroGain).connect(this.vehicleGain);
     nNoise.start();
 
-    // Police siren
+    // Police siren -> sfxGain
     this.sirenOsc = ctx.createOscillator();
     this.sirenOsc.type = 'sawtooth';
     const sLp = ctx.createBiquadFilter();
@@ -154,8 +205,6 @@ export class AudioEngine {
     siren?: { x: number; z: number; vx: number; vz: number },
   ) {
     if (!this.ctx) return;
-    this.sfxGain.gain.value = this.sfxEnabled ? 1 : 0;
-    this.musicGain.gain.value = this.musicEnabled ? 0.32 : 0;
 
     // --- 6-speed gearbox + engine pitch
     const ratio = clamp(Math.abs(speed) / spec.topSpeed, 0, 1.2);
@@ -206,7 +255,9 @@ export class AudioEngine {
     this.stepTimer += dt;
     if (this.stepTimer >= 0.123) {
       this.stepTimer -= 0.123;
-      if (this.musicEnabled) this.musicStep(this.stepIdx++, stars);
+      if (this.musicVolume > 0.005 && this.masterVolume > 0.005) {
+        this.musicStep(this.stepIdx++, stars);
+      }
     }
   }
 
@@ -278,7 +329,7 @@ export class AudioEngine {
   }
 
   crash(intensity01: number) {
-    if (!this.ctx || !this.sfxEnabled) return;
+    if (!this.ctx || this.masterVolume <= 0.001 || this.sfxVolume <= 0.001) return;
     const v = clamp(intensity01, 0.15, 1);
     this.noiseShot(0.22 + v * 0.25, 450, v * 0.55, this.sfxGain);
     const t = this.ctx.currentTime;
@@ -294,21 +345,57 @@ export class AudioEngine {
   }
 
   horn() {
-    this.tone(340, 0.22, 'sawtooth', 0.15);
-    this.tone(425, 0.22, 'sawtooth', 0.15);
+    this.tone(340, 0.22, 'sawtooth', 0.15, this.vehicleGain);
+    this.tone(425, 0.22, 'sawtooth', 0.15, this.vehicleGain);
   }
 
   beep(freq = 660, dur = 0.07) {
-    this.tone(freq, dur, 'square', 0.12);
+    this.tone(freq, dur, 'square', 0.12, this.sfxGain);
   }
 
   stinger(up: boolean) {
     const notes = up ? [330, 440, 554, 660] : [440, 392, 330, 220];
-    notes.forEach((n, i) => setTimeout(() => this.tone(n, 0.16, 'sawtooth', 0.16), i * 90));
+    notes.forEach((n, i) => setTimeout(() => this.tone(n, 0.16, 'sawtooth', 0.16, this.sfxGain), i * 90));
   }
 
-  private tone(freq: number, dur: number, type: OscillatorType, vol: number) {
-    if (!this.ctx || !this.sfxEnabled) return;
+  /** Quick throttle rev preview when adjusting vehicle sound setting. */
+  previewVehicle() {
+    if (!this.ctx || this.masterVolume <= 0.001 || this.vehicleVolume <= 0.001) return;
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator();
+    const f = this.ctx.createBiquadFilter();
+    const g = this.ctx.createGain();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(65, t);
+    o.frequency.exponentialRampToValueAtTime(185, t + 0.12);
+    o.frequency.exponentialRampToValueAtTime(80, t + 0.28);
+    f.type = 'lowpass';
+    f.frequency.setValueAtTime(450, t);
+    f.frequency.exponentialRampToValueAtTime(1250, t + 0.12);
+    f.frequency.exponentialRampToValueAtTime(500, t + 0.28);
+    g.gain.setValueAtTime(0.24, t);
+    g.gain.exponentialRampToValueAtTime(0.01, t + 0.28);
+    o.connect(f).connect(g).connect(this.vehicleGain);
+    o.start(t);
+    o.stop(t + 0.3);
+  }
+
+  /** Quick synth chime preview when adjusting soundtrack setting. */
+  previewSoundtrack() {
+    this.tone(330, 0.12, 'square', 0.1, this.musicGain);
+    setTimeout(() => this.tone(440, 0.14, 'square', 0.12, this.musicGain), 70);
+  }
+
+  /** Quick preview beep when adjusting master or SFX setting. */
+  previewSfx() {
+    this.tone(700, 0.09, 'sawtooth', 0.15, this.sfxGain);
+  }
+
+  private tone(freq: number, dur: number, type: OscillatorType, vol: number, dest: GainNode = this.sfxGain) {
+    if (!this.ctx || this.masterVolume <= 0.001) return;
+    if (dest === this.vehicleGain && this.vehicleVolume <= 0.001) return;
+    if (dest === this.sfxGain && this.sfxVolume <= 0.001) return;
+    if (dest === this.musicGain && this.musicVolume <= 0.001) return;
     const t = this.ctx.currentTime;
     const o = this.ctx.createOscillator();
     const g = this.ctx.createGain();
@@ -316,7 +403,7 @@ export class AudioEngine {
     o.frequency.value = freq;
     g.gain.setValueAtTime(vol, t);
     g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    o.connect(g).connect(this.sfxGain);
+    o.connect(g).connect(dest);
     o.start(t);
     o.stop(t + dur + 0.01);
   }

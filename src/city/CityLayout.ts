@@ -197,6 +197,37 @@ export class RoadGraph {
     return this.intersections[interId(i, j)];
   }
 
+  /**
+   * Endpoints of the road segment a point is on, ordered by heading (fx, fz).
+   * `ahead` is the intersection the car is driving towards, `behind` the one it came from.
+   * Inside an intersection box both are that intersection. Prevents AI from planning
+   * a route that starts at an already-passed node (which causes mid-block U-turns).
+   */
+  aheadIntersection(x: number, z: number, fx: number, fz: number): { ahead: number; behind: number } {
+    const I = this.nearestIntersection(x, z);
+    const h = CITY.ROAD / 2 + 1;
+    if (Math.abs(x - I.x) <= h && Math.abs(z - I.z) <= h) return { ahead: I.id, behind: I.id };
+    const S = CITY.SPACING;
+    const N = CITY.N;
+    const gx = x / S + N / 2;
+    const gz = z / S + N / 2;
+    const ix = Math.max(0, Math.min(N, Math.round(gx)));
+    const jz = Math.max(0, Math.min(N, Math.round(gz)));
+    const offX = Math.abs(x - lineCoord(ix));
+    const offZ = Math.abs(z - lineCoord(jz));
+    if (offX <= offZ) {
+      // On a north-south street (constant x)
+      const j0 = Math.max(0, Math.min(N - 1, Math.floor(gz)));
+      const a = interId(ix, j0);
+      const b = interId(ix, j0 + 1);
+      return fz >= 0 ? { ahead: b, behind: a } : { ahead: a, behind: b };
+    }
+    const i0 = Math.max(0, Math.min(N - 1, Math.floor(gx)));
+    const a = interId(i0, jz);
+    const b = interId(i0 + 1, jz);
+    return fx >= 0 ? { ahead: b, behind: a } : { ahead: a, behind: b };
+  }
+
   /** Intersection whose box contains the point, or -1. */
   intersectionAt(x: number, z: number): number {
     const I = this.nearestIntersection(x, z);

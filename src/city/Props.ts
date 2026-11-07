@@ -1,8 +1,9 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import type { PropSpec, PropType } from './CityLayout';
 import { G, groups, type PhysicsWorld } from '../physics/PhysicsWorld';
-import { glowMat, lambert, lightPoolMat } from '../render/materials';
+import { glowMat, lambert, lightPoolMat, phong } from '../render/materials';
 import type { EventBus } from '../core/events';
 
 interface LiveProp {
@@ -15,27 +16,31 @@ interface LiveProp {
   poolIdx: number; // lamp light pool
 }
 
-/** Merge a list of translated/scaled boxes of a single colour into one BufferGeometry. */
-function makePart(boxes: [number, number, number, number, number, number][]): THREE.BufferGeometry {
-  const out = new THREE.BufferGeometry();
-  const pos: number[] = [];
-  const nor: number[] = [];
-  const idx: number[] = [];
-  for (const [cx, cy, cz, w, h, d] of boxes) {
-    const g = new THREE.BoxGeometry(w, h, d);
-    g.translate(cx, cy, cz);
-    const b = pos.length / 3;
-    const p = g.attributes.position.array as Float32Array;
-    const n = g.attributes.normal.array as Float32Array;
-    const ix = g.index!.array;
-    for (let k = 0; k < p.length; k++) pos.push(p[k]), nor.push(n[k]);
-    for (let k = 0; k < ix.length; k++) idx.push(ix[k] + b);
-  }
-  out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  out.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
-  out.setIndex(idx);
+/** Merge a list of BufferGeometries into one single-material prototype for InstancedMesh. */
+function mergeParts(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  const norm = parts.map((g) => {
+    const n = g.index ? g.toNonIndexed() : g;
+    for (const k of Object.keys(n.attributes)) if (k !== 'position' && k !== 'normal') n.deleteAttribute(k);
+    n.clearGroups();
+    return n;
+  });
+  const out = mergeGeometries(norm, false)!;
+  out.computeBoundingSphere();
   return out;
 }
+
+const boxAt = (w: number, h: number, d: number, x = 0, y = 0, z = 0, rx = 0) => {
+  const g = new THREE.BoxGeometry(w, h, d);
+  if (rx) g.rotateX(rx);
+  return g.translate(x, y, z);
+};
+
+const cylAt = (rt: number, rb: number, h: number, seg: number, x = 0, y = 0, z = 0, rx = 0, rz = 0) => {
+  const g = new THREE.CylinderGeometry(rt, rb, h, seg);
+  if (rx) g.rotateX(rx);
+  if (rz) g.rotateZ(rz);
+  return g.translate(x, y, z);
+};
 
 const PROP_BOX: Record<PropType, [number, number, number, number]> = {
   // hx, hy, hz, mass
@@ -102,11 +107,29 @@ export class PropManager {
       if (!a) this.meshes.set(t, (a = []));
       a.push(im);
     };
-    const metal = lambert({ color: 0x3a3f48 });
-    // lamp: pole + overhang arm; emissive bulb + ground light pool
-    add('lamp', makePart([[0, 3.2, 0, 0.18, 6.4, 0.18], [0, 6.3, 0.7, 0.14, 0.14, 1.6]]), metal);
+    const metal = phong({ color: 0x383d46, shininess: 65, specular: 0x555555 });
+    const darkIron = lambert({ color: 0x22252b });
+    const silver = phong({ color: 0xc8cdd6, shininess: 90 });
+
+    // Streetlamp: octagonal plinth + tapered shaft + curved luminaire arm + cobra head
+    add(
+      'lamp',
+      mergeParts([
+        cylAt(0.2, 0.25, 0.35, 8, 0, 0.175, 0),
+        cylAt(0.14, 0.19, 0.45, 8, 0, 0.55, 0),
+        cylAt(0.065, 0.12, 5.4, 10, 0, 3.45, 0),
+        cylAt(0.05, 0.065, 0.9, 8, 0, 6.2, 0.38, Math.PI * 0.36),
+        cylAt(0.045, 0.05, 0.85, 8, 0, 6.38, 1.12, Math.PI * 0.48),
+        boxAt(0.38, 0.12, 0.62, 0, 6.38, 1.52),
+      ]),
+      metal,
+    );
     const nLamp = byType.get('lamp')?.length ?? 0;
-    this.lampHeads = new THREE.InstancedMesh(makePart([[0, 6.18, 1.35, 0.45, 0.16, 0.55]]), glowMat(0xffd48a), Math.max(1, nLamp));
+    this.lampHeads = new THREE.InstancedMesh(
+      mergeParts([boxAt(0.32, 0.07, 0.48, 0, 6.3, 1.54)]),
+      glowMat(0xffd48a),
+      Math.max(1, nLamp),
+    );
     this.lampHeads.count = nLamp;
     this.lampHeads.frustumCulled = false;
     this.meshes.get('lamp')!.push(this.lampHeads);
@@ -115,18 +138,120 @@ export class PropManager {
     this.lampPools.frustumCulled = false;
     this.group.add(this.lampHeads, this.lampPools);
 
-    add('hydrant', makePart([[0, 0.4, 0, 0.38, 0.8, 0.38], [0, 0.55, 0, 0.58, 0.18, 0.22], [0, 0.85, 0, 0.26, 0.18, 0.26]]), lambert({ color: 0xd9251d }));
-    add('bench', makePart([[0, 0.4, 0, 1.7, 0.1, 0.55], [0, 0.7, -0.22, 1.7, 0.45, 0.1], [-0.7, 0.2, 0, 0.12, 0.4, 0.5], [0.7, 0.2, 0, 0.12, 0.4, 0.5]]), lambert({ color: 0x7c5333 }));
-    add('bin', makePart([[0, 0.55, 0, 0.65, 1.1, 0.65]]), lambert({ color: 0x2b5b3c }));
-    add('newsstand', makePart([[0, 0.85, 0, 1.1, 1.7, 0.8]]), lambert({ color: 0x1e5aa8 }));
-    add('newsstand', makePart([[0, 1.1, 0.41, 0.9, 0.6, 0.04]]), glowMat(0xffe08a));
-    add('cone', new THREE.ConeGeometry(0.28, 0.8, 6).translate(0, 0.4, 0), lambert({ color: 0xff6600, emissive: 0x331100 }));
-    // tree: trunk + foliage
-    add('tree', makePart([[0, 1.3, 0, 0.38, 2.6, 0.38]]), lambert({ color: 0x5a3c24 }));
-    add('tree', new THREE.ConeGeometry(1.7, 3.6, 7).translate(0, 3.6, 0), lambert({ color: 0x264d2b }));
-    // speed camera: pole + yellow box
-    add('camera', makePart([[0, 1.8, 0, 0.16, 3.6, 0.16]]), metal);
-    add('camera', makePart([[0, 3.7, 0, 0.55, 0.7, 0.45]]), lambert({ color: 0xf5c400, emissive: 0x332800 }));
+    // Fire hydrant: flanged base + barrel + domed bonnet + side/front nozzles
+    add(
+      'hydrant',
+      mergeParts([
+        cylAt(0.22, 0.25, 0.12, 12, 0, 0.06, 0),
+        cylAt(0.17, 0.18, 0.56, 12, 0, 0.4, 0),
+        cylAt(0.21, 0.21, 0.08, 12, 0, 0.68, 0),
+        new THREE.SphereGeometry(0.17, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.55).translate(0, 0.72, 0),
+      ]),
+      phong({ color: 0xd9251d, shininess: 70 }),
+    );
+    add(
+      'hydrant',
+      mergeParts([
+        cylAt(0.09, 0.09, 0.48, 10, 0, 0.52, 0, 0, Math.PI / 2),
+        cylAt(0.11, 0.11, 0.12, 10, 0, 0.5, 0.17, Math.PI / 2),
+        cylAt(0.05, 0.06, 0.08, 6, 0, 0.91, 0),
+      ]),
+      silver,
+    );
+
+    // Park bench: wooden slats + cast-iron legs & armrests
+    add(
+      'bench',
+      mergeParts([
+        boxAt(1.68, 0.045, 0.11, 0, 0.42, 0.16),
+        boxAt(1.68, 0.045, 0.11, 0, 0.42, 0.03),
+        boxAt(1.68, 0.045, 0.11, 0, 0.41, -0.1),
+        boxAt(1.68, 0.11, 0.04, 0, 0.58, -0.2, -0.18),
+        boxAt(1.68, 0.11, 0.04, 0, 0.72, -0.23, -0.18),
+        boxAt(1.68, 0.11, 0.04, 0, 0.86, -0.26, -0.18),
+      ]),
+      lambert({ color: 0x865936 }),
+    );
+    add(
+      'bench',
+      mergeParts([
+        boxAt(0.07, 0.42, 0.48, -0.72, 0.21, -0.02),
+        boxAt(0.07, 0.42, 0.48, 0.72, 0.21, -0.02),
+        boxAt(0.07, 0.5, 0.07, -0.72, 0.65, -0.22, -0.18),
+        boxAt(0.07, 0.5, 0.07, 0.72, 0.65, -0.22, -0.18),
+        boxAt(0.06, 0.05, 0.46, -0.72, 0.56, 0.0),
+        boxAt(0.06, 0.05, 0.46, 0.72, 0.56, 0.0),
+      ]),
+      darkIron,
+    );
+
+    // Street bin: ribbed cylindrical bin with domed hood
+    add(
+      'bin',
+      mergeParts([
+        cylAt(0.31, 0.27, 0.82, 14, 0, 0.41, 0),
+        cylAt(0.33, 0.33, 0.06, 14, 0, 0.82, 0),
+        new THREE.SphereGeometry(0.31, 14, 8, 0, Math.PI * 2, 0, Math.PI * 0.5).translate(0, 0.84, 0),
+      ]),
+      phong({ color: 0x245638, shininess: 50 }),
+    );
+    add('bin', mergeParts([cylAt(0.325, 0.325, 0.04, 14, 0, 0.55, 0), boxAt(0.34, 0.14, 0.08, 0, 0.92, 0.25)]), darkIron);
+
+    // Newsstand: kiosk cabinet + pitched awning roof + illuminated magazine rack
+    add(
+      'newsstand',
+      mergeParts([
+        boxAt(1.16, 1.55, 0.82, 0, 0.775, 0),
+        boxAt(1.28, 0.14, 1.02, 0, 1.62, 0.06, 0.1),
+        boxAt(1.2, 0.06, 0.22, 0, 0.78, 0.46),
+      ]),
+      phong({ color: 0x1e5aa8, shininess: 55 }),
+    );
+    add('newsstand', mergeParts([boxAt(0.96, 0.66, 0.04, 0, 1.15, 0.42), boxAt(0.96, 0.16, 0.04, 0, 1.62, 0.56)]), glowMat(0xffe08a));
+
+    // Traffic cone: square weighted base + orange cone + white reflective collar
+    add(
+      'cone',
+      mergeParts([
+        boxAt(0.52, 0.06, 0.52, 0, 0.03, 0),
+        cylAt(0.055, 0.22, 0.76, 12, 0, 0.44, 0),
+      ]),
+      lambert({ color: 0xff6200, emissive: 0x331100 }),
+    );
+    add('cone', mergeParts([cylAt(0.095, 0.135, 0.18, 12, 0, 0.56, 0)]), glowMat(0xf4f6fa));
+
+    // Tree: tapered trunk + main boughs + multi-sphere leafy crown
+    add(
+      'tree',
+      mergeParts([
+        cylAt(0.18, 0.28, 2.5, 10, 0, 1.25, 0),
+        cylAt(0.08, 0.14, 1.1, 7, 0.28, 2.3, 0.1, 0.15, -0.45),
+        cylAt(0.08, 0.13, 1.0, 7, -0.25, 2.2, -0.15, -0.2, 0.42),
+      ]),
+      lambert({ color: 0x5a3c24 }),
+    );
+    add(
+      'tree',
+      mergeParts([
+        new THREE.DodecahedronGeometry(1.45, 1).scale(1.1, 0.95, 1.1).translate(0, 3.6, 0),
+        new THREE.DodecahedronGeometry(1.1, 1).translate(0.75, 3.25, 0.45),
+        new THREE.DodecahedronGeometry(1.05, 1).translate(-0.7, 3.3, -0.45),
+        new THREE.DodecahedronGeometry(0.95, 1).translate(-0.25, 4.45, 0.25),
+      ]),
+      lambert({ color: 0x28542e }),
+    );
+
+    // Speed camera: post + high-vis yellow enclosure + dark visor & dual lenses
+    add('camera', mergeParts([cylAt(0.08, 0.1, 3.5, 10, 0, 1.75, 0), boxAt(0.54, 0.06, 0.52, 0, 4.08, 0.04)]), metal);
+    add('camera', mergeParts([boxAt(0.52, 0.72, 0.44, 0, 3.7, 0)]), phong({ color: 0xf5c400, emissive: 0x332800, shininess: 70 }));
+    add(
+      'camera',
+      mergeParts([
+        cylAt(0.1, 0.1, 0.08, 12, 0, 3.82, 0.23, Math.PI / 2),
+        cylAt(0.07, 0.07, 0.08, 10, 0, 3.54, 0.23, Math.PI / 2),
+      ]),
+      darkIron,
+    );
   }
 
   private writeRestMatrix(s: PropSpec, idx: number, poolIdx: number) {

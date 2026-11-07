@@ -13,6 +13,8 @@ export interface LastKnownSighting {
   speed: number;
   time: number;
   interId: number;
+  behindInterId: number;
+  aheadInterId: number;
   active: boolean;
   lkpChecked: boolean;
 }
@@ -21,6 +23,8 @@ export interface DirectorUnitView {
   id: number;
   x: number;
   z: number;
+  dirX?: number;
+  dirZ?: number;
   seesPlayer: boolean;
   role: TacticalRole;
   targetInter: number;
@@ -34,8 +38,8 @@ export interface DirectorUnitView {
  * - Never leaks the player's true position when line-of-sight is broken.
  * - When in sight: assigns Lead (PIT), Left/Right flankers (box-in), and forward Interceptors
  *   that route via A* to cut the player off 1-3 blocks ahead.
- * - When sight is lost: sends the closest unit to verify the exact LKP while fanning the rest
- *   of the squad across unvisited intersections in the player's projected escape cone.
+ * - When sight is lost: sends the closest unit directly through the exact LKP while converging the
+ *   rest of the squad onto the LKP's immediate forward escape intersections before fanning out.
  */
 export class PoliceDirector {
   readonly lastKnown: LastKnownSighting = {
@@ -48,6 +52,8 @@ export class PoliceDirector {
     speed: 0,
     time: -999,
     interId: 0,
+    behindInterId: 0,
+    aheadInterId: 0,
     active: false,
     lkpChecked: false,
   };
@@ -80,24 +86,36 @@ export class PoliceDirector {
     lk.vz = vz;
     lk.speed = sp;
     lk.time = now;
+    const { ahead, behind } = this.graph.aheadIntersection(x, z, lk.dirX, lk.dirZ);
     lk.interId = this.graph.nearestIntersection(x, z).id;
+    lk.behindInterId = behind;
+    lk.aheadInterId = ahead;
     lk.active = true;
     lk.lkpChecked = false;
     // Fresh visual contact invalidates old search marks so future searches start clean
     this.visitedAt.clear();
   }
 
-  /** Record that a unit drove through its current area, clearing nearby intersections. */
+  /** Record that a unit drove through its current area, clearing nearby intersections and exact LKP. */
   recordUnitPosition(x: number, z: number, now: number): number {
+    const lk = this.lastKnown;
+    const distLkp = Math.hypot(x - lk.x, z - lk.z);
+    const alongEscape = (x - lk.x) * lk.dirX + (z - lk.z) * lk.dirZ;
+    // Only mark LKP checked when a unit physically reaches or passes the exact LKP spot (not 12m behind it on frame 1)
+    if (
+      lk.active &&
+      !lk.lkpChecked &&
+      distLkp <= CITY.ROAD * 0.85 &&
+      (distLkp <= 6.5 || (now >= lk.time + 0.35 && alongEscape >= -2.5))
+    ) {
+      lk.lkpChecked = true;
+    }
     const I = this.graph.nearestIntersection(x, z);
-    if (Math.hypot(I.x - x, I.z - z) <= CITY.ROAD * 1.35) {
-      this.visitedAt.set(I.id, now);
-      if (
-        this.lastKnown.active &&
-        !this.lastKnown.lkpChecked &&
-        Math.hypot(x - this.lastKnown.x, z - this.lastKnown.z) <= CITY.ROAD * 1.4
-      ) {
-        this.lastKnown.lkpChecked = true;
+    // Require the unit to be inside the intersection box (past building corners at 11 m) to clear it
+    if (Math.hypot(I.x - x, I.z - z) <= CITY.ROAD * 0.85) {
+      // Do not prematurely mark the LKP's own segment endpoints visited before the LKP itself is checked
+      if (lk.lkpChecked || (I.id !== lk.interId && I.id !== lk.aheadInterId)) {
+        this.visitedAt.set(I.id, now);
       }
       return I.id;
     }
@@ -119,31 +137,38 @@ export class PoliceDirector {
       );
       sorted.forEach((u, rank) => {
         const d = Math.hypot(u.x - lk.x, u.z - lk.z);
-        // Check if this unit is already ahead of the player along their travel direction
         const relDot = ((u.x - lk.x) * lk.dirX + (u.z - lk.z) * lk.dirZ) / Math.max(1, d);
         if (rank === 0) {
           u.role = 'lead';
-          const lead = clamp(d / 40, 0, 1.4);
+          const lead = clamp(d / 40, 0, 1.3);
           u.targetX = lk.x + lk.vx * lead;
           u.targetZ = lk.z + lk.vz * lead;
-          u.targetInter = this.graph.nearestIntersection(u.targetX, u.targetZ).id;
-        } else if (rank <= 2 && d < 85 && relDot < 0.45) {
+          u.targetInter = this.graph.aheadIntersection(u.targetX, u.targetZ, lk.dirX, lk.dirZ).ahead;
+        } else if (rank <= 2 && (d < 105 || u.seesPlayer) && relDot < 0.65) {
           u.role = rank === 1 ? 'left' : 'right';
-          const lead = clamp(d / 42, 0, 1.2);
+          const lead = clamp(d / 42, 0, 1.15);
           u.targetX = lk.x + lk.vx * lead;
           u.targetZ = lk.z + lk.vz * lead;
-          u.targetInter = this.graph.nearestIntersection(u.targetX, u.targetZ).id;
+          u.targetInter = this.graph.aheadIntersection(u.targetX, u.targetZ, lk.dirX, lk.dirZ).ahead;
         } else {
           // Interceptor: cut the player off 1.5..3.5 seconds ahead on the road grid
           u.role = 'intercept';
-          const lookAhead = clamp(1.6 + (rank - 1) * 0.65, 1.5, 3.8);
-          const aheadDist = Math.max(CITY.SPACING * 1.1, lk.speed * lookAhead);
+          const lookAhead = clamp(1.6 + (rank - 1) * 0.65, 1.5, 3.6);
+          const aheadDist = clamp(Math.max(CITY.SPACING * 1.05, lk.speed * lookAhead), CITY.SPACING, 215);
           const ix = lk.x + lk.dirX * aheadDist;
           const iz = lk.z + lk.dirZ * aheadDist;
           const inter = this.graph.nearestIntersection(ix, iz);
-          u.targetInter = inter.id;
-          u.targetX = inter.x;
-          u.targetZ = inter.z;
+          // If this interceptor already reached the cutoff intersection, close in toward the player's LKP intersection
+          if (Math.hypot(u.x - inter.x, u.z - inter.z) < CITY.ROAD * 1.15) {
+            const closeInter = this.graph.intersections[lk.aheadInterId] ?? inter;
+            u.targetInter = closeInter.id;
+            u.targetX = lk.x;
+            u.targetZ = lk.z;
+          } else {
+            u.targetInter = inter.id;
+            u.targetX = inter.x;
+            u.targetZ = inter.z;
+          }
         }
       });
       return;
@@ -153,7 +178,7 @@ export class PoliceDirector {
     const age = Math.max(0, now - lk.time);
     const taken = new Set<number>();
 
-    // 1. If the exact LKP hasn't been physically checked yet, send the closest unit straight to LKP
+    // 1. If the exact LKP hasn't been physically checked yet, send the closest unit straight through LKP
     let lkpUnit: DirectorUnitView | null = null;
     if (!lk.lkpChecked) {
       let bestD = Infinity;
@@ -173,34 +198,39 @@ export class PoliceDirector {
       }
     }
 
-    // 2. For all other units, assign de-conflicted search intersections fanning out from LKP
+    // 2. Pass 1: preserve valid existing sector targets so units needing a new target never steal a teammate's active target
+    const needsPick: DirectorUnitView[] = [];
+    let sectorRank = 0;
     for (const u of units) {
       if (u === lkpUnit) continue;
+      const wasSector = u.role === 'sector';
       u.role = 'sector';
 
-      // Keep existing target intersection if it is still unvisited and not claimed by another unit
+      const curInter = u.targetInter >= 0 ? this.graph.intersections[u.targetInter] : undefined;
       const curVisited = this.visitedAt.get(u.targetInter) ?? -999;
-      const distToCur =
-        u.targetInter >= 0
-          ? Math.hypot(
-              this.graph.intersections[u.targetInter].x - u.x,
-              this.graph.intersections[u.targetInter].z - u.z,
-            )
-          : 0;
+      const distToCur = curInter ? Math.hypot(curInter.x - u.x, curInter.z - u.z) : 0;
+      const distCurLkp = curInter ? Math.hypot(curInter.x - lk.x, curInter.z - lk.z) : Infinity;
+      const maxKeepDist = !lk.lkpChecked || age < 3 ? CITY.SPACING * 1.15 : 230;
       if (
-        u.targetInter >= 0 &&
+        wasSector &&
+        curInter &&
         now - curVisited > 14 &&
-        distToCur > CITY.ROAD * 1.2 &&
+        distToCur > CITY.ROAD * 0.9 &&
+        distCurLkp <= maxKeepDist &&
         !taken.has(u.targetInter)
       ) {
-        const I = this.graph.intersections[u.targetInter];
-        u.targetX = I.x;
-        u.targetZ = I.z;
-        taken.add(I.id);
-        continue;
+        u.targetX = curInter.x;
+        u.targetZ = curInter.z;
+        taken.add(curInter.id);
+        sectorRank++;
+      } else {
+        needsPick.push(u);
       }
+    }
 
-      const nextId = this.pickSearchIntersection(u, age, now, taken);
+    // 3. Pass 2: assign fresh forward/sector intersections to units that need a new target
+    for (const u of needsPick) {
+      const nextId = this.pickSearchIntersection(u, age, now, taken, sectorRank++);
       const I = this.graph.intersections[nextId];
       u.targetInter = I.id;
       u.targetX = I.x;
@@ -215,12 +245,25 @@ export class PoliceDirector {
     age: number,
     now: number,
     taken: Set<number>,
+    sectorRank = 0,
   ): number {
     const lk = this.lastKnown;
-    const expectedDist = clamp(Math.max(22, lk.speed) * clamp(age, 1.2, 8), 75, 290);
-    const maxRadius = clamp(120 + age * 28, 140, 420);
+    // Start tight around LKP (1 block = 94 m) while LKP is unchecked or fresh, then expand up to 215 m
+    const baseDist = !lk.lkpChecked || age < 2.5
+      ? CITY.SPACING
+      : clamp(Math.max(18, lk.speed * 0.72) * clamp(age - 1, 1, 5), 75, 190);
+    const expectedDist = clamp(baseDist + (sectorRank % 2 === 1 ? 25 : -10), 60, 210);
+    const maxRadius = clamp(140 + age * 20, 155, 245);
+    const ufx = u.dirX ?? lk.dirX;
+    const ufz = u.dirZ ?? lk.dirZ;
+    const uAhead = this.graph.aheadIntersection(u.x, u.z, ufx, ufz).ahead;
+    const lkpNeighbors = new Set([
+      ...this.graph.neighbors(lk.interId),
+      ...this.graph.neighbors(lk.aheadInterId),
+    ]);
+    const unitForwardSet = new Set([uAhead, ...this.graph.neighbors(uAhead)]);
 
-    let bestId = lk.interId;
+    let bestId = lk.aheadInterId;
     let bestScore = -Infinity;
 
     for (const I of this.graph.intersections) {
@@ -235,39 +278,53 @@ export class PoliceDirector {
       // 1. Escape-cone alignment with player's last seen heading
       if (dLkp > 8) {
         const dot = (dx * lk.dirX + dz * lk.dirZ) / dLkp;
-        score += dot * 55; // strong preference for forward escape cone
+        score += dot * 58; // strong preference for forward escape cone
         // Side-street turnoff bonus (intersections perpendicular to the escape line)
         if (dot > -0.15 && dot < 0.55) score += 18;
       }
 
-      // 2. Ring distance match (where the suspect could plausibly be after `age` seconds)
-      const ringErr = Math.abs(dLkp - expectedDist);
-      score -= ringErr * 0.32;
+      // 2. Priority on the exact intersection ahead of LKP & immediate 1-block escape branches
+      if (!lk.lkpChecked || age < 7) {
+        if (I.id === lk.aheadInterId) score += 80;
+        if (lkpNeighbors.has(I.id)) score += 45;
+      }
+      // Forward continuity: prefer the intersection ahead of the unit and its connected outgoing branches (no mid-block U-turns)
+      if (unitForwardSet.has(I.id)) score += 34;
+      const dUnit = Math.hypot(I.x - u.x, I.z - u.z);
+      if (dUnit > 8 && (u.dirX !== undefined || u.dirZ !== undefined)) {
+        const uDot = ((I.x - u.x) * ufx + (I.z - u.z) * ufz) / dUnit;
+        score += uDot * 24;
+      }
 
-      // 3. Unvisited / freshness bonus (never bunch up on already-cleared intersections)
+      // 3. Ring distance match (where the suspect could plausibly be after `age` seconds)
+      const ringErr = Math.abs(dLkp - expectedDist);
+      score -= ringErr * 0.36;
+
+      // 4. Unvisited / freshness bonus (never bunch up on already-cleared intersections)
       const lastVisit = this.visitedAt.get(I.id);
       if (lastVisit !== undefined) {
         const since = now - lastVisit;
         if (since < 18) score -= 260 - since * 10;
       } else {
-        score += 35;
+        score += 42;
       }
 
-      // 4. De-confliction against other cops' assigned targets
+      // 5. De-confliction: never assign two units to the same intersection
       if (taken.has(I.id)) {
-        score -= 300;
+        score -= 350;
       } else {
         for (const tId of taken) {
+          // Do not repel sector units away from the LKP's own segment endpoints!
+          if (tId === lk.interId || tId === lk.aheadInterId) continue;
           const T = this.graph.intersections[tId];
           if (Math.hypot(I.x - T.x, I.z - T.z) <= CITY.SPACING * 1.05) {
-            score -= 85;
+            score -= 35;
           }
         }
       }
 
-      // 5. Travel efficiency for this specific cop unit
-      const dUnit = Math.hypot(I.x - u.x, I.z - u.z);
-      score -= dUnit * 0.18;
+      // 6. Travel efficiency for this specific cop unit
+      score -= dUnit * 0.2;
 
       if (score > bestScore) {
         bestScore = score;

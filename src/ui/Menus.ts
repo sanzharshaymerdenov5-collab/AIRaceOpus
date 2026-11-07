@@ -9,6 +9,7 @@ export interface MenuCallbacks {
   onResume: () => void;
   onSettingsChanged: () => void;
   onSplashContinue: () => void;
+  onPreviewSound?: (kind: 'master' | 'soundtrack' | 'vehicle' | 'sfx') => void;
 }
 
 const starsBar = (n: number) => '★'.repeat(n) + '☆'.repeat(5 - n);
@@ -158,10 +159,30 @@ export class Menus {
     this.root.style.pointerEvents = 'auto';
     const r = this.save.retro;
     const blurPct = Math.round((r.motionBlur ?? 1) * 100);
+    const masterPct = Math.round((this.save.masterVolume ?? 0.85) * 100);
+    const musicPct = Math.round((this.save.musicVolume ?? 0.70) * 100);
+    const vehPct = Math.round((this.save.vehicleVolume ?? 0.85) * 100);
+    const sfxPct = Math.round((this.save.sfxVolume ?? 0.85) * 100);
+
     this.root.innerHTML = `
       <div class="menu-screen pause-screen">
-        <h2>RETRO &amp; AUDIO OPTIONS</h2>
+        <h2>OPTIONS &amp; AUDIO</h2>
         <div class="opt-list">
+          <div class="opt-group-header">AUDIO SETTINGS</div>
+          <label><span>MASTER VOLUME (<span id="o-vol-master-val">${masterPct === 0 ? 'MUTED' : masterPct + '%'}</span>)</span>
+            <input type="range" id="o-vol-master" min="0" max="100" step="5" value="${masterPct}"/>
+          </label>
+          <label><span>SOUNDTRACK / MUSIC (<span id="o-vol-mus-val">${musicPct === 0 ? 'MUTED' : musicPct + '%'}</span>)</span>
+            <input type="range" id="o-vol-mus" min="0" max="100" step="5" value="${musicPct}"/>
+          </label>
+          <label><span>VEHICLE SOUNDS (<span id="o-vol-veh-val">${vehPct === 0 ? 'MUTED' : vehPct + '%'}</span>)</span>
+            <input type="range" id="o-vol-veh" min="0" max="100" step="5" value="${vehPct}"/>
+          </label>
+          <label><span>SFX &amp; SIRENS (<span id="o-vol-sfx-val">${sfxPct === 0 ? 'MUTED' : sfxPct + '%'}</span>)</span>
+            <input type="range" id="o-vol-sfx" min="0" max="100" step="5" value="${sfxPct}"/>
+          </label>
+
+          <div class="opt-group-header">GRAPHICS &amp; RETRO</div>
           <label>INTERNAL RESOLUTION
             <select id="o-res">
               <option value="240" ${r.resHeight === 240 ? 'selected' : ''}>320×240 (PS1 / Ultra Crunchy)</option>
@@ -176,15 +197,38 @@ export class Menus {
           <label><input type="checkbox" id="o-bloom" ${r.bloom ? 'checked' : ''}/> NEON BLOOM GLOW</label>
           <label><input type="checkbox" id="o-scan" ${r.scanlines ? 'checked' : ''}/> CRT SCANLINES &amp; VIGNETTE</label>
           <label><input type="checkbox" id="o-ps1" ${r.ps1 ? 'checked' : ''}/> PS1 VERTEX WOBBLE (BONUS)</label>
+
+          <div class="opt-group-header">GAMEPLAY</div>
           <label>TRAFFIC DENSITY <input type="range" id="o-traf" min="10" max="55" value="${this.save.trafficDensity}"/></label>
-          <label><input type="checkbox" id="o-sfx" ${this.save.sfx ? 'checked' : ''}/> ENGINE &amp; SIREN SFX</label>
-          <label><input type="checkbox" id="o-mus" ${this.save.music ? 'checked' : ''}/> SYNTHWAVE PURSUIT MUSIC</label>
         </div>
         <div class="menu-buttons"><button id="o-back" class="btn primary">APPLY &amp; BACK</button></div>
       </div>
     `;
+
+    const masterValEl = this.root.querySelector('#o-vol-master-val') as HTMLElement;
+    const musValEl = this.root.querySelector('#o-vol-mus-val') as HTMLElement;
+    const vehValEl = this.root.querySelector('#o-vol-veh-val') as HTMLElement;
+    const sfxValEl = this.root.querySelector('#o-vol-sfx-val') as HTMLElement;
     const blurValEl = this.root.querySelector('#o-blur-val') as HTMLElement;
+
     const apply = () => {
+      const mVal = Number((this.root.querySelector('#o-vol-master') as HTMLInputElement).value);
+      const musVal = Number((this.root.querySelector('#o-vol-mus') as HTMLInputElement).value);
+      const vehVal = Number((this.root.querySelector('#o-vol-veh') as HTMLInputElement).value);
+      const sfxVal = Number((this.root.querySelector('#o-vol-sfx') as HTMLInputElement).value);
+
+      this.save.masterVolume = mVal / 100;
+      this.save.musicVolume = musVal / 100;
+      this.save.vehicleVolume = vehVal / 100;
+      this.save.sfxVolume = sfxVal / 100;
+      this.save.music = musVal > 0;
+      this.save.sfx = sfxVal > 0 || vehVal > 0;
+
+      if (masterValEl) masterValEl.textContent = mVal === 0 ? 'MUTED' : `${mVal}%`;
+      if (musValEl) musValEl.textContent = musVal === 0 ? 'MUTED' : `${musVal}%`;
+      if (vehValEl) vehValEl.textContent = vehVal === 0 ? 'MUTED' : `${vehVal}%`;
+      if (sfxValEl) sfxValEl.textContent = sfxVal === 0 ? 'MUTED' : `${sfxVal}%`;
+
       r.resHeight = Number((this.root.querySelector('#o-res') as HTMLSelectElement).value);
       const bp = Number((this.root.querySelector('#o-blur') as HTMLInputElement).value);
       r.motionBlur = bp / 100;
@@ -194,14 +238,19 @@ export class Menus {
       r.scanlines = (this.root.querySelector('#o-scan') as HTMLInputElement).checked;
       r.ps1 = (this.root.querySelector('#o-ps1') as HTMLInputElement).checked;
       this.save.trafficDensity = Number((this.root.querySelector('#o-traf') as HTMLInputElement).value);
-      this.save.sfx = (this.root.querySelector('#o-sfx') as HTMLInputElement).checked;
-      this.save.music = (this.root.querySelector('#o-mus') as HTMLInputElement).checked;
       this.cb.onSettingsChanged();
     };
+
     this.root.querySelectorAll('input,select').forEach((el) => {
       el.addEventListener('change', apply);
       el.addEventListener('input', apply);
     });
+
+    this.root.querySelector('#o-vol-master')!.addEventListener('change', () => this.cb.onPreviewSound?.('master'));
+    this.root.querySelector('#o-vol-mus')!.addEventListener('change', () => this.cb.onPreviewSound?.('soundtrack'));
+    this.root.querySelector('#o-vol-veh')!.addEventListener('change', () => this.cb.onPreviewSound?.('vehicle'));
+    this.root.querySelector('#o-vol-sfx')!.addEventListener('change', () => this.cb.onPreviewSound?.('sfx'));
+
     this.root.querySelector('#o-back')!.addEventListener('click', () => {
       apply();
       onBack();

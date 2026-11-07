@@ -47,8 +47,8 @@ export class HeatSystem {
   /** Heat level at which pursuit started (for escape bonus). */
   private peakHeat = 0;
 
-  static readonly UNSEEN_TO_COOLDOWN = 3; // s without LOS before cooldown starts
-  static readonly PULLOVER_FLEE_TIME = 8;
+  static readonly UNSEEN_TO_COOLDOWN = 5; // s without LOS before cooldown starts
+  static readonly PULLOVER_FLEE_TIME = 7;
   static readonly PULLOVER_STOP_TIME = 2.5;
   static readonly BUST_DIST = 12;
   static readonly BUST_SPEED = 2.8;
@@ -57,7 +57,7 @@ export class HeatSystem {
   constructor(private bus?: EventBus) {}
 
   cooldownDuration(stars = this.stars) {
-    return 8 + 4 * stars;
+    return 14 + 5 * stars;
   }
 
   reportCrime(type: CrimeType, witnessed: boolean, scale = 1): number {
@@ -110,11 +110,11 @@ export class HeatSystem {
           this.resetClean();
           this.bus?.emit('ticket', { fine });
           this.bus?.emit('pullover', { active: false });
-        } else if (this.pulloverTime >= HeatSystem.PULLOVER_FLEE_TIME && ctx.nearestCopDist < 120) {
+        } else if (this.pulloverTime >= HeatSystem.PULLOVER_FLEE_TIME && ctx.nearestCopDist < 220) {
           this.bus?.emit('crime', { type: 'evading', witnessed: true, heat: STAR_THRESHOLDS[0] - this.heat });
           this.bus?.emit('pullover', { active: false });
           this.addHeat(STAR_THRESHOLDS[0] - this.heat);
-        } else if (ctx.nearestCopDist > 200) {
+        } else if (ctx.nearestCopDist > 260) {
           // the cop lost interest
           this.resetClean();
           this.bus?.emit('pullover', { active: false });
@@ -145,7 +145,9 @@ export class HeatSystem {
             this.bus?.emit('cooldownStarted', {});
           }
           if (this.mode === 'cooldown') {
-            this.cooldown += dt / this.cooldownDuration();
+            // Cops still searching within ~1 block slow down cooldown progression so they don't give up right next to you
+            const proximityRate = ctx.nearestCopDist < 85 ? 0.35 : ctx.nearestCopDist < 140 ? 0.65 : 1;
+            this.cooldown += (dt * proximityRate) / this.cooldownDuration();
             if (this.cooldown >= 1) this.escape();
           }
         }

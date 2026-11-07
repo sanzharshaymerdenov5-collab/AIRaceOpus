@@ -114,17 +114,20 @@ export class Game {
         this.pipeline.resize();
         (this.scene.fog as THREE.FogExp2).density = this.save.retro.fogDensity;
         this.traffic.targetCount = this.save.trafficDensity;
-        this.audio.sfxEnabled = this.save.sfx;
-        this.audio.musicEnabled = this.save.music;
+        this.audio.setVolumes(this.save.masterVolume, this.save.musicVolume, this.save.vehicleVolume, this.save.sfxVolume);
         writeSave(this.save);
       },
       onSplashContinue: () => {
         this.respawnPlayer();
         this.setState('roam');
       },
+      onPreviewSound: (kind) => {
+        if (kind === 'vehicle') this.audio.previewVehicle();
+        else if (kind === 'soundtrack') this.audio.previewSoundtrack();
+        else if (kind === 'master' || kind === 'sfx') this.audio.previewSfx();
+      },
     });
-    this.audio.sfxEnabled = this.save.sfx;
-    this.audio.musicEnabled = this.save.music;
+    this.audio.setVolumes(this.save.masterVolume, this.save.musicVolume, this.save.vehicleVolume, this.save.sfxVolume);
 
     this.wireEvents();
     window.addEventListener('resize', () => this.pipeline.resize());

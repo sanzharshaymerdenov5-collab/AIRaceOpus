@@ -141,12 +141,19 @@ html, body {
 .swatch.sel { border-color: #fff; transform: scale(1.15); }
 
 .opt-list {
-  display: flex; flex-direction: column; gap: 10px;
-  background: rgba(8,12,24,0.9); border: 2px solid #3c4f74; padding: 18px 24px;
-  margin-bottom: 16px; font-size: 12px; font-weight: 700; min-width: 420px;
+  display: flex; flex-direction: column; gap: 8px;
+  background: rgba(8,12,24,0.92); border: 2px solid #3c4f74; padding: 18px 24px;
+  margin-bottom: 14px; font-size: 12px; font-weight: 700; min-width: 440px; max-width: 520px;
+  max-height: 80vh; overflow-y: auto; box-sizing: border-box;
+}
+.opt-group-header {
+  font-family: 'Press Start 2P', monospace; font-size: 9px; color: #ffae00;
+  letter-spacing: 0.12em; margin-top: 6px; padding-bottom: 3px;
+  border-bottom: 1px solid rgba(255, 174, 0, 0.28);
 }
 .opt-list label { display: flex; align-items: center; justify-content: space-between; gap: 14px; cursor: pointer; }
 .opt-list select, .opt-list input { font-family: inherit; pointer-events: auto; }
+.opt-list input[type="range"] { accent-color: #ff9d00; cursor: pointer; min-width: 140px; }
 
 .splash-screen h1 { font-size: 56px; margin: 0 0 8px; letter-spacing: 0.14em; text-shadow: 0 4px 18px #000; }
 .splash-screen p { font-size: 15px; color: #dde6f5; margin-bottom: 24px; letter-spacing: 0.08em; }
