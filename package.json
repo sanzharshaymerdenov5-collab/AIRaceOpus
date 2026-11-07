@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "deploy": "npm run build && touch dist/.nojekyll && git -C dist init -b gh-pages && git -C dist add -A && git -C dist commit -m 'Deploy to GitHub Pages' && git -C dist push -f origin gh-pages:gh-pages && rm -rf dist/.git"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",
